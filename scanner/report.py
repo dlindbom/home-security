@@ -86,6 +86,7 @@ def print_report(findings: list[Finding]) -> None:
         "exposed_services": "Exponerade tjänster",
         "active_connections": "Aktiva anslutningar",
         "process": "Processanalys",
+        "traffic": "Trafikanalys",
     }
 
     for cat, cat_findings in categories.items():
@@ -286,6 +287,7 @@ const categoryTitles = {{
   exposed_services: '⚠️ Exponerade tjänster',
   active_connections: '🔗 Aktiva anslutningar',
   process: '⚙️ Processanalys',
+  traffic: '📡 Trafikanalys',
 }};
 
 // Group network findings by category

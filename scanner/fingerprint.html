@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Webbläsarspår — Home Security Scanner</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    background: #0c0e14;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    padding: 40px 20px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 24px; font-weight: 800; margin-bottom: 4px; }
+  .subtitle { color: #64748b; font-size: 13px; margin-bottom: 32px; }
+  .section-title {
+    font-size: 14px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #64748b; margin: 28px 0 12px;
+  }
+  .card {
+    border-radius: 14px; padding: 18px 22px; margin-bottom: 10px;
+    border: 1px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.02);
+  }
+  .card.risk-green  { background: rgba(16,185,129,0.06); border-color: rgba(16,185,129,0.2); }
+  .card.risk-yellow { background: rgba(245,158,11,0.05); border-color: rgba(245,158,11,0.18); }
+  .card.risk-red    { background: rgba(239,68,68,0.05); border-color: rgba(239,68,68,0.18); }
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .card-title { font-weight: 600; font-size: 14px; }
+  .badge {
+    font-size: 11px; font-weight: 600; padding: 2px 10px;
+    border-radius: 20px; text-transform: uppercase;
+  }
+  .badge-green  { background: rgba(16,185,129,0.12); color: #10b981; border: 1px solid rgba(16,185,129,0.3); }
+  .badge-yellow { background: rgba(245,158,11,0.1); color: #f59e0b; border: 1px solid rgba(245,158,11,0.25); }
+  .badge-red    { background: rgba(239,68,68,0.1); color: #ef4444; border: 1px solid rgba(239,68,68,0.25); }
+  .card-value { font-size: 13px; color: #94a3b8; line-height: 1.6; word-break: break-all; }
+  .card-tip { margin-top: 10px; font-size: 12px; color: #cbd5e1; padding: 8px 12px;
+    border-left: 3px solid rgba(245,158,11,0.4); background: rgba(255,255,255,0.02); border-radius: 6px; }
+  .summary {
+    display: flex; gap: 16px; margin: 32px 0; padding: 20px;
+    border-radius: 14px; background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+  .stat { font-size: 14px; color: #94a3b8; }
+  .stat strong { color: #e2e8f0; }
+  .canvas-box { margin: 12px 0; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 8px; text-align: center; }
+  .canvas-box canvas { border-radius: 4px; }
+  #loading { text-align: center; padding: 60px; color: #64748b; font-size: 14px; }
+  #results { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔍 Webbläsarspår</h1>
+  <p class="subtitle">Vad avslöjar din webbläsare om dig?</p>
+
+  <div id="loading">Analyserar din webbläsare…</div>
+  <div id="results"></div>
+</div>
+
+<script>
+(function() {
+  const findings = [];
+
+  function addFinding(category, title, value, risk, tip) {
+    findings.push({ category, title, value, risk, tip: tip || '' });
+  }
+
+  function riskLevel(risk) {
+    if (risk === 'green') return { cls: 'risk-green', badge: 'badge-green', label: 'OK' };
+    if (risk === 'yellow') return { cls: 'risk-yellow', badge: 'badge-yellow', label: 'Varning' };
+    return { cls: 'risk-red', badge: 'badge-red', label: 'Risk' };
+  }
+
+  // ── User Agent ──
+  const ua = navigator.userAgent;
+  addFinding('Identitet', 'User Agent', ua, 'yellow',
+    'User Agent avslöjar webbläsare, OS och version. Överväg ett tillägg som randomiserar den.');
+
+  // ── Platform ──
+  addFinding('Identitet', 'Plattform', navigator.platform || 'Okänd', 'yellow',
+    'Visar ditt operativsystem.');
+
+  // ── Language ──
+  const langs = navigator.languages ? navigator.languages.join(', ') : navigator.language;
+  addFinding('Identitet', 'Språk', langs, 'yellow',
+    'Språkinställningar kan användas för att identifiera dig.');
+
+  // ── Screen ──
+  const screenInfo = `${screen.width}×${screen.height} (tillgänglig: ${screen.availWidth}×${screen.availHeight}), färgdjup: ${screen.colorDepth}-bit, pixelratio: ${devicePixelRatio}`;
+  addFinding('Hårdvara', 'Skärm', screenInfo, 'yellow',
+    'Unik kombination av skärmstorlek och pixelratio gör dig spårbar.');
+
+  // ── Hardware concurrency ──
+  if (navigator.hardwareConcurrency) {
+    addFinding('Hårdvara', 'CPU-kärnor', navigator.hardwareConcurrency.toString(), 'yellow');
+  }
+
+  // ── Device memory ──
+  if (navigator.deviceMemory) {
+    addFinding('Hårdvara', 'RAM (ungefärligt)', navigator.deviceMemory + ' GB', 'yellow');
+  }
+
+  // ── Timezone ──
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  addFinding('Plats', 'Tidszon', tz, 'yellow',
+    'Tidszonen avslöjar ungefärligt var du befinner dig.');
+
+  // ── Geolocation API ──
+  const geoAvail = 'geolocation' in navigator ? 'Tillgänglig (kräver godkännande)' : 'Ej tillgänglig';
+  addFinding('Plats', 'Geolocation API', geoAvail,
+    'geolocation' in navigator ? 'yellow' : 'green');
+
+  // ── Cookies ──
+  addFinding('Spårning', 'Cookies', navigator.cookieEnabled ? 'Aktiverade' : 'Avaktiverade',
+    navigator.cookieEnabled ? 'yellow' : 'green',
+    navigator.cookieEnabled ? 'Cookies möjliggör spårning mellan besök.' : '');
+
+  // ── Do Not Track ──
+  const dnt = navigator.doNotTrack;
+  const dntText = dnt === '1' ? 'Aktiverat' : dnt === '0' ? 'Avaktiverat' : 'Ej inställt';
+  addFinding('Spårning', 'Do Not Track', dntText,
+    dnt === '1' ? 'green' : 'yellow',
+    dnt !== '1' ? 'Aktivera Do Not Track i webbläsarens integritetsinställningar.' : '');
+
+  // ── Third-party cookies (heuristic) ──
+  // ── Local/Session storage ──
+  let storageAvail = 'Nej';
+  try { if (window.localStorage && window.sessionStorage) storageAvail = 'Ja (localStorage + sessionStorage)'; }
+  catch(e) { storageAvail = 'Blockerat'; }
+  addFinding('Spårning', 'Webblagring', storageAvail,
+    storageAvail.startsWith('Ja') ? 'yellow' : 'green',
+    storageAvail.startsWith('Ja') ? 'Webblagring kan användas för att spåra dig utan cookies.' : '');
+
+  // ── WebRTC ──
+  const rtcAvail = (window.RTCPeerConnection || window.webkitRTCPeerConnection) ? 'Tillgänglig' : 'Ej tillgänglig';
+  addFinding('Integritet', 'WebRTC', rtcAvail,
+    rtcAvail === 'Tillgänglig' ? 'red' : 'green',
+    rtcAvail === 'Tillgänglig' ? 'WebRTC kan läcka din riktiga IP-adress även bakom VPN!' : '');
+
+  // Try to detect WebRTC IP leak
+  if (window.RTCPeerConnection) {
+    try {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      pc.createDataChannel('');
+      pc.createOffer().then(offer => pc.setLocalDescription(offer));
+      pc.onicecandidate = function(e) {
+        if (!e.candidate) return;
+        const parts = e.candidate.candidate.split(' ');
+        const ip = parts[4];
+        if (ip && ip.indexOf('.') > -1) {
+          const el = document.getElementById('webrtc-ip');
+          if (el) el.textContent = 'Läckt IP via WebRTC: ' + ip;
+        }
+        pc.close();
+      };
+    } catch(e) {}
+  }
+
+  // ── Canvas fingerprint ──
+  let canvasHash = 'Ej tillgänglig';
+  let canvasRisk = 'green';
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 280; canvas.height = 40;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#0c0e14'; ctx.fillRect(0, 0, 280, 40);
+    ctx.fillStyle = '#e2e8f0'; ctx.font = '14px Arial';
+    ctx.fillText('Fingerprint Test 🔐 åäö', 5, 25);
+    ctx.fillStyle = 'rgba(16,185,129,0.5)';
+    ctx.beginPath(); ctx.arc(240, 20, 15, 0, Math.PI * 2); ctx.fill();
+    const dataURL = canvas.toDataURL();
+    // Simple hash
+    let hash = 0;
+    for (let i = 0; i < dataURL.length; i++) {
+      hash = ((hash << 5) - hash) + dataURL.charCodeAt(i);
+      hash |= 0;
+    }
+    canvasHash = 'Hash: ' + Math.abs(hash).toString(16);
+    canvasRisk = 'red';
+  } catch(e) {
+    canvasHash = 'Blockerat av webbläsaren';
+    canvasRisk = 'green';
+  }
+  addFinding('Fingeravtryck', 'Canvas Fingerprint', canvasHash, canvasRisk,
+    canvasRisk === 'red' ? 'Canvas-fingeravtryck är unikt för din dator. Överväg CanvasBlocker-tillägg.' : '');
+
+  // ── WebGL ──
+  let webglInfo = 'Ej tillgänglig';
+  let webglRisk = 'green';
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    if (gl) {
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      if (ext) {
+        const vendor = gl.getParameter(ext.UNMASKED_VENDOR_WEBGL);
+        const renderer = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);
+        webglInfo = `${vendor} — ${renderer}`;
+        webglRisk = 'red';
+      } else {
+        webglInfo = 'Tillgänglig (renderer dold)';
+        webglRisk = 'yellow';
+      }
+    }
+  } catch(e) {}
+  addFinding('Fingeravtryck', 'WebGL Renderer', webglInfo, webglRisk,
+    webglRisk === 'red' ? 'Avslöjar exakt grafikprocessor — unikt för din hårdvara.' : '');
+
+  // ── Audio fingerprint ──
+  let audioAvail = (window.AudioContext || window.webkitAudioContext) ? 'Tillgänglig' : 'Ej tillgänglig';
+  addFinding('Fingeravtryck', 'Audio API', audioAvail,
+    audioAvail === 'Tillgänglig' ? 'yellow' : 'green',
+    audioAvail === 'Tillgänglig' ? 'Kan användas för ljudbaserat fingeravtryck.' : '');
+
+  // ── Fonts (basic detection) ──
+  const testFonts = ['Arial', 'Courier New', 'Georgia', 'Helvetica', 'Monaco', 'Comic Sans MS',
+    'Impact', 'Trebuchet MS', 'Verdana', 'Palatino', 'Lucida Console'];
+  const detectedFonts = [];
+  const span = document.createElement('span');
+  span.style.cssText = 'position:absolute;left:-9999px;font-size:72px';
+  span.textContent = 'mmmmmmmmmmlli';
+  document.body.appendChild(span);
+  span.style.fontFamily = 'monospace';
+  const defaultWidth = span.offsetWidth;
+  testFonts.forEach(f => {
+    span.style.fontFamily = `"${f}", monospace`;
+    if (span.offsetWidth !== defaultWidth) detectedFonts.push(f);
+  });
+  document.body.removeChild(span);
+  addFinding('Fingeravtryck', 'Detekterade typsnitt', detectedFonts.join(', ') || 'Inga extra', 'yellow',
+    'Installerade typsnitt skapar ett unikt fingeravtryck.');
+
+  // ── Installed plugins ──
+  const plugins = Array.from(navigator.plugins || []).map(p => p.name).filter(Boolean);
+  addFinding('Fingeravtryck', 'Webbläsarplugins', plugins.length > 0 ? plugins.join(', ') : 'Inga',
+    plugins.length > 2 ? 'yellow' : 'green');
+
+  // ── Connection info ──
+  if (navigator.connection) {
+    const conn = navigator.connection;
+    addFinding('Nätverk', 'Anslutningstyp', `${conn.effectiveType || 'okänd'}, nedlänk: ${conn.downlink || '?'} Mbps`,
+      'yellow');
+  }
+
+  // ── Battery ──
+  if (navigator.getBattery) {
+    navigator.getBattery().then(b => {
+      const el = document.getElementById('battery-value');
+      if (el) el.textContent = `Nivå: ${Math.round(b.level * 100)}%, laddar: ${b.charging ? 'Ja' : 'Nej'}`;
+    });
+    addFinding('Hårdvara', 'Batteri', '<span id="battery-value">Hämtar…</span>', 'yellow',
+      'Batteristatus kan användas för fingeravtryck.');
+  }
+
+  // ── Riskpoäng & spårbarhetsbedomning ──
+  function calculateScore() {
+    const weights = { green: 0, yellow: 1, red: 3 };
+    let totalPoints = 0;
+    let maxPoints = findings.length * 3;
+    findings.forEach(f => totalPoints += weights[f.risk]);
+
+    // 0 = helt privat, 100 = helt exponerad
+    const rawScore = Math.round((totalPoints / maxPoints) * 100);
+
+    // Uniqueness estimate based on key fingerprint vectors
+    let uniqueBits = 0;
+    findings.forEach(f => {
+      // High-entropy fingerprint sources add more "uniqueness bits"
+      if (f.title === 'Canvas Fingerprint' && f.risk !== 'green') uniqueBits += 12;
+      else if (f.title === 'WebGL Renderer' && f.risk === 'red') uniqueBits += 8;
+      else if (f.title === 'Detekterade typsnitt') uniqueBits += 4;
+      else if (f.title === 'Skärm') uniqueBits += 4;
+      else if (f.title === 'User Agent') uniqueBits += 6;
+      else if (f.title === 'Språk') uniqueBits += 3;
+      else if (f.title === 'Tidszon') uniqueBits += 3;
+      else if (f.title === 'Audio API' && f.risk !== 'green') uniqueBits += 4;
+      else if (f.title === 'CPU-kärnor') uniqueBits += 2;
+      else if (f.title === 'WebRTC' && f.risk === 'red') uniqueBits += 10;
+      else if (f.risk === 'red') uniqueBits += 3;
+      else if (f.risk === 'yellow') uniqueBits += 1;
+    });
+
+    // Estimate how unique: 33+ bits ≈ unique among billions
+    let uniqueness, uniqueLabel, uniqueColor;
+    if (uniqueBits >= 33) {
+      uniqueness = 'Mycket hög';
+      uniqueLabel = 'Din webbläsare har ett nästan unikt fingeravtryck — du kan spåras med hög precision.';
+      uniqueColor = '#ef4444';
+    } else if (uniqueBits >= 20) {
+      uniqueness = 'Hög';
+      uniqueLabel = 'Din webbläsare är identifierbar bland tusentals användare.';
+      uniqueColor = '#f59e0b';
+    } else if (uniqueBits >= 10) {
+      uniqueness = 'Medel';
+      uniqueLabel = 'Ditt fingeravtryck är relativt vanligt — svårare att spåra individuellt.';
+      uniqueColor = '#f59e0b';
+    } else {
+      uniqueness = 'Låg';
+      uniqueLabel = 'Din webbläsare avslöjar lite — svårt att skilja dig från andra.';
+      uniqueColor = '#10b981';
+    }
+
+    return { rawScore, uniqueBits, uniqueness, uniqueLabel, uniqueColor };
+  }
+
+  // ── Render ──
+  function render() {
+    const categories = {};
+    findings.forEach(f => {
+      if (!categories[f.category]) categories[f.category] = [];
+      categories[f.category].push(f);
+    });
+
+    let counts = { green: 0, yellow: 0, red: 0 };
+    findings.forEach(f => counts[f.risk]++);
+
+    const score = calculateScore();
+
+    // Score gauge color
+    let gaugeColor;
+    if (score.rawScore <= 30) gaugeColor = '#10b981';
+    else if (score.rawScore <= 60) gaugeColor = '#f59e0b';
+    else gaugeColor = '#ef4444';
+
+    let html = '';
+
+    // ── Big score hero ──
+    html += `<div style="text-align:center;padding:36px 20px 28px;margin-bottom:24px;
+      border-radius:18px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06)">
+      <div style="position:relative;width:140px;height:140px;margin:0 auto 20px">
+        <svg viewBox="0 0 140 140" style="transform:rotate(-90deg)">
+          <circle cx="70" cy="70" r="60" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="10"/>
+          <circle cx="70" cy="70" r="60" fill="none" stroke="${gaugeColor}" stroke-width="10"
+            stroke-dasharray="${Math.round(score.rawScore * 3.77)} 377"
+            stroke-linecap="round" style="transition:stroke-dasharray 1s ease"/>
+        </svg>
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+          <div style="font-size:36px;font-weight:800;color:${gaugeColor}">${score.rawScore}</div>
+          <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em">av 100</div>
+        </div>
+      </div>
+      <div style="font-size:18px;font-weight:700;margin-bottom:6px">Riskpoäng: ${score.rawScore}/100</div>
+      <div style="font-size:13px;color:#94a3b8;max-width:400px;margin:0 auto">
+        ${score.rawScore <= 30 ? 'Bra! Din webbläsare avslöjar relativt lite.' :
+          score.rawScore <= 60 ? 'Förbättringsmöjligheter finns — se rekommendationerna nedan.' :
+          'Hög exponering — din webbläsare läcker mycket information.'}
+      </div>
+    </div>`;
+
+    // ── Uniqueness card ──
+    html += `<div style="padding:20px 24px;margin-bottom:24px;border-radius:14px;
+      background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span style="font-size:14px;font-weight:700;color:#e2e8f0">🧬 Spårbarhet</span>
+        <span style="font-size:13px;font-weight:700;color:${score.uniqueColor}">${score.uniqueness}</span>
+      </div>
+      <div style="font-size:13px;color:#94a3b8;line-height:1.6;margin-bottom:12px">${score.uniqueLabel}</div>
+      <div style="background:rgba(255,255,255,0.04);border-radius:8px;padding:12px 16px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span style="font-size:12px;color:#64748b">Unika identifieringsbitar</span>
+          <span style="font-size:14px;font-weight:700;color:${score.uniqueColor}">${score.uniqueBits} bitar</span>
+        </div>
+        <div style="height:6px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${Math.min(score.uniqueBits / 40 * 100, 100)}%;
+            background:${score.uniqueColor};border-radius:3px;transition:width 1s ease"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px;color:#475569">
+          <span>0 — anonym</span>
+          <span>18 — 1 av 250k</span>
+          <span>33+ — unik</span>
+        </div>
+      </div>
+    </div>`;
+
+    // ── Summary counts ──
+    html += `<div class="summary">
+      <div class="stat">🟢 OK: <strong>${counts.green}</strong></div>
+      <div class="stat">🟡 Varning: <strong>${counts.yellow}</strong></div>
+      <div class="stat">🔴 Risk: <strong>${counts.red}</strong></div>
+    </div>`;
+
+    // ── Category cards ──
+    for (const [cat, items] of Object.entries(categories)) {
+      html += `<div class="section-title">${cat}</div>`;
+      items.forEach(f => {
+        const r = riskLevel(f.risk);
+        let tipHtml = f.tip ? `<div class="card-tip">💡 ${f.tip}</div>` : '';
+        html += `<div class="card ${r.cls}">
+          <div class="card-header">
+            <span class="card-title">${f.title}</span>
+            <span class="badge ${r.badge}">${r.label}</span>
+          </div>
+          <div class="card-value">${f.value}</div>
+          ${tipHtml}
+        </div>`;
+      });
+    }
+
+    // ── Bottom verdict ──
+    if (counts.red > 0) {
+      html += `<div style="margin-top:28px;padding:16px 20px;border-radius:12px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);color:#fca5a5;font-size:14px">
+        ⚠️ <strong>${counts.red} allvarliga spårningsrisker</strong> hittades. Se rekommendationerna ovan.</div>`;
+    } else if (counts.yellow > 0) {
+      html += `<div style="margin-top:28px;padding:16px 20px;border-radius:12px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);color:#fcd34d;font-size:14px">
+        ⚡ Inga akuta problem, men <strong>${counts.yellow} saker</strong> kan förbättras.</div>`;
+    } else {
+      html += `<div style="margin-top:28px;padding:16px 20px;border-radius:12px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);color:#6ee7b7;font-size:14px">
+        ✓ Din webbläsare avslöjar minimalt!</div>`;
+    }
+
+    document.getElementById('loading').style.display = 'none';
+    const resultsEl = document.getElementById('results');
+    resultsEl.innerHTML = html;
+    resultsEl.style.display = 'block';
+  }
+
+  // Small delay to allow battery API etc
+  setTimeout(render, 300);
+})();
+</script>
+</body>
+</html>

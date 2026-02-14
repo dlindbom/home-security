@@ -4,5 +4,6 @@ __pycache__/
 .DS_Store
 *.json
 *.html
+!scanner/fingerprint.html
 !scanner/**/*.py
 !tests/**/*.py

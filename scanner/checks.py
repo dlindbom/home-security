@@ -833,6 +833,233 @@ def check_traffic() -> list[Finding]:
     return findings
 
 
+# ── Systemsäkerhet ────────────────────────────────────────────────────────────
+
+def check_sip() -> list[Finding]:
+    """Check System Integrity Protection status."""
+    findings: list[Finding] = []
+    stdout, stderr, rc = run_command(["csrutil", "status"])
+    if rc != 0:
+        findings.append(Finding(
+            category="system",
+            title="SIP-status",
+            severity=Severity.YELLOW,
+            description="Kunde inte kontrollera SIP-status.",
+        ))
+        return findings
+
+    if "enabled" in stdout.lower():
+        findings.append(Finding(
+            category="system",
+            title="System Integrity Protection",
+            severity=Severity.GREEN,
+            description="SIP är aktiverat.",
+        ))
+    else:
+        findings.append(Finding(
+            category="system",
+            title="System Integrity Protection",
+            severity=Severity.RED,
+            description="SIP är avaktiverat – systemfiler saknar skydd.",
+            recommendation="Starta om i Recovery Mode och kör: csrutil enable",
+        ))
+    return findings
+
+
+def check_gatekeeper() -> list[Finding]:
+    """Check Gatekeeper status."""
+    findings: list[Finding] = []
+    stdout, stderr, rc = run_command(["spctl", "--status"])
+    # spctl returns exit code 0 if enabled, non-zero text varies
+    combined = (stdout + stderr).lower()
+
+    if "assessments enabled" in combined:
+        findings.append(Finding(
+            category="system",
+            title="Gatekeeper",
+            severity=Severity.GREEN,
+            description="Gatekeeper är aktiverat – appar verifieras innan de körs.",
+        ))
+    else:
+        findings.append(Finding(
+            category="system",
+            title="Gatekeeper",
+            severity=Severity.RED,
+            description="Gatekeeper är avaktiverat – appar från okända utvecklare kan köras.",
+            recommendation="Aktivera: sudo spctl --master-enable",
+        ))
+    return findings
+
+
+def check_filevault() -> list[Finding]:
+    """Check FileVault disk encryption status."""
+    findings: list[Finding] = []
+    stdout, stderr, rc = run_command(["fdesetup", "status"])
+
+    if rc != 0:
+        findings.append(Finding(
+            category="system",
+            title="FileVault",
+            severity=Severity.YELLOW,
+            description="Kunde inte kontrollera FileVault-status.",
+        ))
+        return findings
+
+    if "on" in stdout.lower():
+        findings.append(Finding(
+            category="system",
+            title="FileVault diskkryptering",
+            severity=Severity.GREEN,
+            description="FileVault är aktiverat – disken är krypterad.",
+        ))
+    else:
+        findings.append(Finding(
+            category="system",
+            title="FileVault diskkryptering",
+            severity=Severity.RED,
+            description="FileVault är avaktiverat – diskens data är okrypterad.",
+            recommendation="Aktivera FileVault i Systeminställningar → Integritet och säkerhet.",
+        ))
+    return findings
+
+
+def check_auto_updates() -> list[Finding]:
+    """Check if automatic macOS software updates are enabled."""
+    findings: list[Finding] = []
+
+    # Check automatic check
+    stdout, stderr, rc = run_command([
+        "defaults", "read",
+        "/Library/Preferences/com.apple.SoftwareUpdate",
+        "AutomaticCheckEnabled",
+    ])
+    auto_check = stdout.strip() == "1" if rc == 0 else None
+
+    # Check automatic download
+    stdout2, stderr2, rc2 = run_command([
+        "defaults", "read",
+        "/Library/Preferences/com.apple.SoftwareUpdate",
+        "AutomaticDownload",
+    ])
+    auto_download = stdout2.strip() == "1" if rc2 == 0 else None
+
+    # Check automatic install for macOS updates
+    stdout3, stderr3, rc3 = run_command([
+        "defaults", "read",
+        "/Library/Preferences/com.apple.SoftwareUpdate",
+        "AutomaticallyInstallMacOSUpdates",
+    ])
+    auto_install = stdout3.strip() == "1" if rc3 == 0 else None
+
+    parts = []
+    if auto_check is True:
+        parts.append("Automatisk sökning: på")
+    elif auto_check is False:
+        parts.append("Automatisk sökning: av")
+
+    if auto_download is True:
+        parts.append("Automatisk nedladdning: på")
+    elif auto_download is False:
+        parts.append("Automatisk nedladdning: av")
+
+    if auto_install is True:
+        parts.append("Automatisk installation: på")
+    elif auto_install is False:
+        parts.append("Automatisk installation: av")
+
+    if not parts:
+        findings.append(Finding(
+            category="system",
+            title="Automatiska uppdateringar",
+            severity=Severity.YELLOW,
+            description="Kunde inte läsa uppdateringsinställningar.",
+        ))
+        return findings
+
+    all_on = auto_check is True and auto_download is True
+    desc = "\n".join(parts)
+
+    if all_on and auto_install is True:
+        findings.append(Finding(
+            category="system",
+            title="Automatiska uppdateringar",
+            severity=Severity.GREEN,
+            description=desc,
+        ))
+    elif all_on:
+        findings.append(Finding(
+            category="system",
+            title="Automatiska uppdateringar",
+            severity=Severity.YELLOW,
+            description=desc,
+            recommendation="Aktivera automatisk installation av macOS-uppdateringar för bästa skydd.",
+        ))
+    else:
+        findings.append(Finding(
+            category="system",
+            title="Automatiska uppdateringar",
+            severity=Severity.YELLOW,
+            description=desc,
+            recommendation="Aktivera automatiska uppdateringar i Systeminställningar → Allmänt → Programuppdatering.",
+        ))
+    return findings
+
+
+# ── ARP-tabell ────────────────────────────────────────────────────────────────
+
+def check_arp_table() -> list[Finding]:
+    """Analyze ARP table for duplicate MAC addresses (ARP spoofing indicator)."""
+    findings: list[Finding] = []
+    stdout, stderr, rc = run_command(["arp", "-a"])
+
+    if rc != 0:
+        findings.append(Finding(
+            category="network_advanced",
+            title="ARP-tabell",
+            severity=Severity.YELLOW,
+            description="Kunde inte läsa ARP-tabellen.",
+        ))
+        return findings
+
+    # Parse ARP entries: hostname (ip) at mac on iface ...
+    mac_to_ips: dict = {}
+    entries = 0
+    for line in stdout.splitlines():
+        match = re.match(r".*?\(([^)]+)\)\s+at\s+([0-9a-f:]+)", line, re.IGNORECASE)
+        if match:
+            ip = match.group(1)
+            mac = match.group(2).lower()
+            if mac in ("ff:ff:ff:ff:ff:ff", "(incomplete)"):
+                continue
+            mac_to_ips.setdefault(mac, []).append(ip)
+            entries += 1
+
+    # Check for duplicate MACs (potential ARP spoofing)
+    duplicates = {mac: ips for mac, ips in mac_to_ips.items() if len(ips) > 1}
+
+    if duplicates:
+        dup_lines = []
+        for mac, ips in duplicates.items():
+            dup_lines.append(f"MAC {mac} → {', '.join(ips)}")
+        findings.append(Finding(
+            category="network_advanced",
+            title="Duplicerade MAC-adresser",
+            severity=Severity.RED,
+            description="Samma MAC-adress svarar för flera IP:er – möjlig ARP-spoofing!\n"
+                        + "\n".join(dup_lines),
+            recommendation="Kontrollera att ingen obehörig enhet manipulerar nätverkstrafiken.",
+        ))
+    else:
+        findings.append(Finding(
+            category="network_advanced",
+            title="ARP-tabell",
+            severity=Severity.GREEN,
+            description=f"{entries} enheter i ARP-tabellen, inga duplicerade MAC-adresser.",
+        ))
+
+    return findings
+
+
 # ── Kör alla kontroller ──────────────────────────────────────────────────────
 
 def run_all_checks() -> list[Finding]:
@@ -845,4 +1072,9 @@ def run_all_checks() -> list[Finding]:
     all_findings.extend(check_active_connections())
     all_findings.extend(check_processes())
     all_findings.extend(check_traffic())
+    all_findings.extend(check_sip())
+    all_findings.extend(check_gatekeeper())
+    all_findings.extend(check_filevault())
+    all_findings.extend(check_auto_updates())
+    all_findings.extend(check_arp_table())
     return all_findings

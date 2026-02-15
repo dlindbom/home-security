@@ -57,17 +57,8 @@ def main() -> int:
         report_path = os.path.join(_REPORT_DIR, "rapport.html")
         export_html(findings, report_path)
 
-        # Fingerprint page bundled with the scanner
-        fingerprint_path = os.path.join(
-            os.path.dirname(__file__), "fingerprint.html"
-        )
-
         print(f"  🌐 Öppnar säkerhetsrapport i webbläsaren…")
         _open_in_browser(report_path)
-
-        if os.path.exists(fingerprint_path):
-            print(f"  🔍 Öppnar fingerprint-analys i webbläsaren…")
-            _open_in_browser(fingerprint_path)
 
     # Exit code: 2 if red findings, 1 if yellow, 0 if all green
     severities = {f.severity.value for f in findings}

@@ -69,12 +69,12 @@ def print_finding(finding: Finding) -> None:
     print()
 
 
-def print_report(findings: list[Finding]) -> None:
+def print_report(findings: list) -> None:
     """Print the full report grouped by category."""
     print_header()
 
     # Group findings by category
-    categories: dict[str, list[Finding]] = {}
+    categories = {}
     for f in findings:
         categories.setdefault(f.category, []).append(f)
 
@@ -87,6 +87,8 @@ def print_report(findings: list[Finding]) -> None:
         "active_connections": "Aktiva anslutningar",
         "process": "Processanalys",
         "traffic": "Trafikanalys",
+        "system": "Systemsäkerhet",
+        "network_advanced": "Nätverksanalys",
     }
 
     for cat, cat_findings in categories.items():
@@ -98,7 +100,7 @@ def print_report(findings: list[Finding]) -> None:
     print_summary(findings)
 
 
-def print_summary(findings: list[Finding]) -> None:
+def print_summary(findings: list) -> None:
     """Print summary counts and overall verdict."""
     counts = Counter(f.severity for f in findings)
     g = counts.get(Severity.GREEN, 0)
@@ -121,7 +123,7 @@ def print_summary(findings: list[Finding]) -> None:
     print()
 
 
-def export_json(findings: list[Finding], filepath: str) -> None:
+def export_json(findings: list, filepath: str) -> None:
     """Export findings as structured JSON."""
     data = {
         "scanner": "macOS Säkerhetsskanner",
@@ -150,12 +152,158 @@ def export_json(findings: list[Finding], filepath: str) -> None:
     print(f"  📄 JSON exporterad till: {filepath}")
 
 
-def export_html(findings: list[Finding], filepath: str) -> None:
-    """Export combined HTML report: network findings + live browser fingerprinting."""
+# ─── AI-analys ────────────────────────────────────────────────────────────────
+
+def _generate_ai_summary(findings: list) -> str:
+    """Generate a deterministic AI-style analysis summary as HTML."""
+    cats = {}
+    for f in findings:
+        cats.setdefault(f.category, []).append(f)
+
+    counts = Counter(f.severity for f in findings)
+    g = counts.get(Severity.GREEN, 0)
+    y = counts.get(Severity.YELLOW, 0)
+    r = counts.get(Severity.RED, 0)
+    total = g + y + r
+
+    # --- Overall grade ---
+    if r >= 3:
+        grade = "Kritiskt"
+        grade_color = "#ef4444"
+        grade_icon = "🔴"
+        grade_text = "Flera allvarliga säkerhetsbrister har identifierats som behöver åtgärdas omedelbart."
+    elif r >= 1:
+        grade = "Förbättra"
+        grade_color = "#ef4444"
+        grade_icon = "🔴"
+        grade_text = "Säkerhetsrisker har hittats som bör åtgärdas snarast."
+    elif y >= 5:
+        grade = "Acceptabelt"
+        grade_color = "#f59e0b"
+        grade_icon = "🟡"
+        grade_text = "Grundsäkerheten är på plats, men det finns flera förbättringsmöjligheter."
+    elif y >= 1:
+        grade = "Bra"
+        grade_color = "#10b981"
+        grade_icon = "🟢"
+        grade_text = "Bra säkerhetsläge med några mindre förbättringsmöjligheter."
+    else:
+        grade = "Utmärkt"
+        grade_color = "#10b981"
+        grade_icon = "🟢"
+        grade_text = "Utmärkt säkerhetsläge. Alla kontroller passerade utan anmärkning."
+
+    sections = []
+
+    # --- Grade header ---
+    sections.append(
+        f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">'
+        f'<span style="font-size:28px">{grade_icon}</span>'
+        f'<div>'
+        f'<div style="font-size:18px;font-weight:800;color:{grade_color}">{grade}</div>'
+        f'<div style="font-size:13px;color:#94a3b8">{grade_text}</div>'
+        f'</div></div>'
+    )
+
+    # --- Firewall & Network ---
+    fw_findings = cats.get("firewall", []) + cats.get("wifi", []) + cats.get("dns", [])
+    if fw_findings:
+        items = []
+        for f in fw_findings:
+            icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
+            items.append(f"{icon} {_escape_html(f.title)}: {_escape_html(f.description.split(chr(10))[0])}")
+        sections.append(_ai_section("🔒 Nätverksskydd", items))
+
+    # --- Ports & connections ---
+    port_findings = cats.get("open_ports", [])
+    conn_findings = cats.get("active_connections", [])
+    if port_findings or conn_findings:
+        items = []
+        risky_ports = [f for f in port_findings if f.severity != Severity.GREEN]
+        safe_ports = [f for f in port_findings if f.severity == Severity.GREEN]
+        if risky_ports:
+            items.append(f"⚠️ {len(risky_ports)} port{'ar' if len(risky_ports) > 1 else ''} lyssnar på alla gränssnitt och bör granskas")
+        if safe_ports:
+            items.append(f"✅ {len(safe_ports)} port{'ar' if len(safe_ports) > 1 else ''} lyssnar enbart lokalt")
+        for f in conn_findings:
+            if f.severity == Severity.GREEN:
+                items.append(f"✅ {_escape_html(f.description.split(chr(10))[0])}")
+        ext_conns = [f for f in conn_findings if f.severity != Severity.GREEN]
+        if ext_conns:
+            items.append(f"⚠️ {len(ext_conns)} externa anslutningar flaggade för granskning")
+        sections.append(_ai_section("🚪 Portar & Anslutningar", items))
+
+    # --- Traffic analysis ---
+    traffic_findings = cats.get("traffic", [])
+    if traffic_findings:
+        items = []
+        for f in traffic_findings:
+            icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
+            first_line = f.description.split("\n")[0] if f.description else f.title
+            items.append(f"{icon} {_escape_html(f.title)}: {_escape_html(first_line)}")
+        sections.append(_ai_section("📡 Trafikanalys", items))
+
+    # --- Process analysis ---
+    proc_findings = cats.get("process", [])
+    if proc_findings:
+        items = []
+        for f in proc_findings:
+            icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
+            items.append(f"{icon} {_escape_html(f.description.split(chr(10))[0])}")
+        sections.append(_ai_section("⚙️ Processer", items))
+
+    # --- System security ---
+    sys_findings = cats.get("system", [])
+    if sys_findings:
+        items = []
+        for f in sys_findings:
+            icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
+            items.append(f"{icon} {_escape_html(f.title)}: {_escape_html(f.description.split(chr(10))[0])}")
+        sections.append(_ai_section("🖥️ Systemsäkerhet", items))
+
+    # --- ARP / network advanced ---
+    arp_findings = cats.get("network_advanced", [])
+    if arp_findings:
+        items = []
+        for f in arp_findings:
+            icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
+            items.append(f"{icon} {_escape_html(f.title)}: {_escape_html(f.description.split(chr(10))[0])}")
+        sections.append(_ai_section("🔬 Nätverksanalys", items))
+
+    # --- Recommendations ---
+    recs = []
+    red_findings = [f for f in findings if f.severity == Severity.RED and f.recommendation]
+    yellow_findings = [f for f in findings if f.severity == Severity.YELLOW and f.recommendation]
+    for f in red_findings[:5]:
+        recs.append(f'<span style="color:#ef4444">❌</span> {_escape_html(f.recommendation)}')
+    for f in yellow_findings[:5]:
+        recs.append(f'<span style="color:#f59e0b">⚠️</span> {_escape_html(f.recommendation)}')
+    if recs:
+        sections.append(_ai_section("💡 Prioriterade rekommendationer", recs))
+
+    return "\n".join(sections)
+
+
+def _ai_section(title: str, items: list) -> str:
+    """Render one section of the AI analysis."""
+    li = "".join(
+        f'<div style="font-size:13px;color:#cbd5e1;padding:4px 0;line-height:1.5">{item}</div>'
+        for item in items
+    )
+    return (
+        f'<div style="margin-bottom:16px">'
+        f'<div style="font-size:14px;font-weight:700;margin-bottom:6px;color:#e2e8f0">{title}</div>'
+        f'{li}</div>'
+    )
+
+
+# ─── HTML export ──────────────────────────────────────────────────────────────
+
+def export_html(findings: list, filepath: str) -> None:
+    """Export tabbed HTML report with overview, network, traffic & fingerprint tabs."""
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     node = platform.node()
 
-    # Build network findings as JSON for the JS to consume
     net_json = json.dumps([
         {
             "category": f.category,
@@ -172,7 +320,7 @@ def export_html(findings: list[Finding], filepath: str) -> None:
     y = counts.get(Severity.YELLOW, 0)
     r = counts.get(Severity.RED, 0)
 
-    # Read the fingerprint.html JS (everything between <script> tags)
+    ai_summary = _generate_ai_summary(findings)
     fp_js = _get_fingerprint_js()
 
     html = f"""<!DOCTYPE html>
@@ -186,13 +334,42 @@ def export_html(findings: list[Finding], filepath: str) -> None:
   body {{
     min-height: 100vh; background: #0c0e14; color: #e2e8f0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    padding: 40px 20px;
+    padding: 0;
   }}
-  .wrap {{ max-width: 720px; margin: 0 auto; }}
+  .wrap {{ max-width: 760px; margin: 0 auto; padding: 32px 20px 40px; }}
   h1 {{ font-size: 24px; font-weight: 800; margin-bottom: 4px; }}
-  .meta {{ color: #64748b; font-size: 13px; margin-bottom: 28px; }}
+  .meta {{ color: #64748b; font-size: 13px; margin-bottom: 20px; }}
 
-  /* Collapsible sections */
+  /* ── Tab navigation ── */
+  .tab-bar {{
+    display: flex; gap: 0; margin-bottom: 24px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }}
+  .tab-btn {{
+    flex-shrink: 0; padding: 12px 20px; font-size: 13px; font-weight: 600;
+    color: #64748b; background: none; border: none; cursor: pointer;
+    border-bottom: 2px solid transparent; transition: all 0.2s;
+    white-space: nowrap;
+  }}
+  .tab-btn:hover {{ color: #94a3b8; background: rgba(255,255,255,0.02); }}
+  .tab-btn.active {{
+    color: #e2e8f0; border-bottom-color: #6366f1;
+  }}
+  .tab-btn .tab-badge {{
+    display: inline-block; font-size: 10px; font-weight: 700;
+    padding: 1px 6px; border-radius: 10px; margin-left: 6px;
+    vertical-align: middle;
+  }}
+  .tab-badge-red {{ background: rgba(239,68,68,0.15); color: #ef4444; }}
+  .tab-badge-yellow {{ background: rgba(245,158,11,0.12); color: #f59e0b; }}
+  .tab-badge-green {{ background: rgba(16,185,129,0.12); color: #10b981; }}
+
+  .tab-panel {{ display: none; animation: fadeIn 0.25s ease; }}
+  .tab-panel.active {{ display: block; }}
+  @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(4px); }} to {{ opacity: 1; transform: translateY(0); }} }}
+
+  /* ── Collapsible sections ── */
   .section {{
     border: 1px solid rgba(255,255,255,0.06); border-radius: 16px;
     margin-bottom: 16px; overflow: hidden;
@@ -207,10 +384,6 @@ def export_html(findings: list[Finding], filepath: str) -> None:
   .section-title {{
     font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 10px;
   }}
-  .section-badge {{
-    font-size: 11px; font-weight: 600; padding: 2px 10px;
-    border-radius: 20px;
-  }}
   .section-arrow {{
     font-size: 12px; color: #64748b; transition: transform 0.2s;
   }}
@@ -220,10 +393,10 @@ def export_html(findings: list[Finding], filepath: str) -> None:
     padding: 0 22px;
   }}
   .section.open .section-body {{
-    max-height: 5000px; padding: 0 22px 18px;
+    max-height: 8000px; padding: 0 22px 18px;
   }}
 
-  /* Cards inside sections */
+  /* ── Cards ── */
   .card {{
     border-radius: 12px; padding: 16px 20px; margin-bottom: 10px;
     border: 1px solid rgba(255,255,255,0.06);
@@ -247,13 +420,26 @@ def export_html(findings: list[Finding], filepath: str) -> None:
     border-left: 3px solid rgba(245,158,11,0.4); background: rgba(255,255,255,0.02); border-radius: 6px;
   }}
 
-  .summary {{
-    display: flex; gap: 16px; margin-bottom: 24px; padding: 18px;
-    border-radius: 14px; background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.06); flex-wrap: wrap;
+  /* ── AI analysis card ── */
+  .ai-card {{
+    border-radius: 16px; padding: 24px 28px; margin-bottom: 20px;
+    background: linear-gradient(135deg, rgba(99,102,241,0.06), rgba(139,92,246,0.04));
+    border: 1px solid rgba(99,102,241,0.15);
   }}
-  .stat {{ font-size: 14px; color: #94a3b8; }}
-  .stat strong {{ color: #e2e8f0; }}
+  .ai-card-header {{
+    display: flex; align-items: center; gap: 10px; margin-bottom: 16px;
+  }}
+  .ai-card-header span:first-child {{ font-size: 20px; }}
+  .ai-card-header span:last-child {{ font-size: 16px; font-weight: 700; }}
+
+  /* ── Score display ── */
+  .score-grid {{
+    display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap;
+  }}
+  .score-box {{
+    flex: 1; min-width: 200px; padding: 16px 20px; border-radius: 14px;
+    background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);
+  }}
 </style>
 </head>
 <body>
@@ -261,15 +447,61 @@ def export_html(findings: list[Finding], filepath: str) -> None:
   <h1>🛡️ Säkerhetsrapport</h1>
   <div class="meta">{_escape_html(now)} &middot; {_escape_html(node)}</div>
 
-  <div id="score-area"></div>
-  <div id="network-sections"></div>
-  <div id="browser-sections"></div>
-  <div id="verdict-area"></div>
+  <!-- Tab navigation -->
+  <div class="tab-bar" id="tab-bar">
+    <button class="tab-btn active" id="btn-overview">🛡️ Översikt<span class="tab-badge-slot"></span></button>
+    <button class="tab-btn" id="btn-network">🔒 Nätverk<span class="tab-badge-slot"></span></button>
+    <button class="tab-btn" id="btn-traffic">📡 Trafik<span class="tab-badge-slot"></span></button>
+    <button class="tab-btn" id="btn-fingerprint">🔍 Fingeravtryck<span class="tab-badge-slot"></span></button>
+  </div>
+
+  <!-- Tab 1: Overview -->
+  <div class="tab-panel active" id="panel-overview">
+    <div id="score-area"></div>
+    <div class="ai-card">
+      <div class="ai-card-header">
+        <span>🤖</span><span>Analys</span>
+      </div>
+      {ai_summary}
+      <div id="ai-fp-section" style="margin-bottom:16px"></div>
+    </div>
+    <div id="verdict-area"></div>
+  </div>
+
+  <!-- Tab 2: Network -->
+  <div class="tab-panel" id="panel-network">
+    <div id="network-sections"></div>
+  </div>
+
+  <!-- Tab 3: Traffic -->
+  <div class="tab-panel" id="panel-traffic">
+    <div id="traffic-sections"></div>
+  </div>
+
+  <!-- Tab 4: Fingerprint -->
+  <div class="tab-panel" id="panel-fingerprint">
+    <div id="browser-sections"></div>
+  </div>
 </div>
 
 <script>
+// ── Tab switching ──
+var tabMap = ['overview','network','traffic','fingerprint'];
+function switchTab(idx) {{
+  var btns = document.querySelectorAll('.tab-btn');
+  var panels = document.querySelectorAll('.tab-panel');
+  for (var i = 0; i < btns.length; i++) btns[i].className = 'tab-btn';
+  for (var i = 0; i < panels.length; i++) panels[i].className = 'tab-panel';
+  btns[idx].className = 'tab-btn active';
+  document.getElementById('panel-' + tabMap[idx]).className = 'tab-panel active';
+}}
+document.getElementById('btn-overview').addEventListener('click', function() {{ switchTab(0); }});
+document.getElementById('btn-network').addEventListener('click', function() {{ switchTab(1); }});
+document.getElementById('btn-traffic').addEventListener('click', function() {{ switchTab(2); }});
+document.getElementById('btn-fingerprint').addEventListener('click', function() {{ switchTab(3); }});
+
 // ── Network findings from scanner ──
-const networkFindings = {net_json};
+var networkFindings = {net_json};
 
 // ── Helpers ──
 function riskLevel(r) {{
@@ -277,9 +509,9 @@ function riskLevel(r) {{
   if (r === 'yellow') return {{ cls: 'risk-yellow', badge: 'badge-yellow', label: 'Varning' }};
   return {{ cls: 'risk-red', badge: 'badge-red', label: 'Risk' }};
 }}
-function esc(s) {{ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }}
+function esc(s) {{ return s ? s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : ''; }}
 
-const categoryTitles = {{
+var categoryTitles = {{
   firewall: '🔥 Brandvägg',
   wifi: '📶 WiFi-säkerhet',
   dns: '🌐 DNS-konfiguration',
@@ -288,13 +520,19 @@ const categoryTitles = {{
   active_connections: '🔗 Aktiva anslutningar',
   process: '⚙️ Processanalys',
   traffic: '📡 Trafikanalys',
+  system: '🖥️ Systemsäkerhet',
+  network_advanced: '🔬 Nätverksanalys',
 }};
 
-// Group network findings by category
+// Network categories (tab 2)
+var networkCats = ['firewall','wifi','dns','open_ports','exposed_services','active_connections','process','system','network_advanced'];
+// Traffic categories (tab 3)
+var trafficCats = ['traffic'];
+
 function groupByCategory(items) {{
-  const groups = {{}};
-  items.forEach(f => {{
-    const cat = f.category || f.cat;
+  var groups = {{}};
+  items.forEach(function(f) {{
+    var cat = f.category || f.cat;
     if (!groups[cat]) groups[cat] = [];
     groups[cat].push(f);
   }});
@@ -302,91 +540,155 @@ function groupByCategory(items) {{
 }}
 
 function makeCard(f) {{
-  const sev = f.severity || f.risk;
-  const r = riskLevel(sev);
-  const desc = (f.description || f.value || '').replace(/\\n/g, '<br>');
-  const rec = f.recommendation || f.tip || '';
-  const tipHtml = rec ? `<div class="card-tip">💡 ${{esc(rec)}}</div>` : '';
-  return `<div class="card ${{r.cls}}">
-    <div class="card-header">
-      <span class="card-title">${{esc(f.title)}}</span>
-      <span class="badge ${{r.badge}}">${{r.label}}</span>
-    </div>
-    <div class="card-value">${{desc}}</div>
-    ${{tipHtml}}
-  </div>`;
+  var sev = f.severity || f.risk;
+  var r = riskLevel(sev);
+  var desc = (f.description || f.value || '').replace(/\\n/g, '<br>');
+  var rec = f.recommendation || f.tip || '';
+  var tipHtml = rec ? '<div class="card-tip">💡 ' + esc(rec) + '</div>' : '';
+  return '<div class="card ' + r.cls + '">' +
+    '<div class="card-header">' +
+      '<span class="card-title">' + esc(f.title) + '</span>' +
+      '<span class="badge ' + r.badge + '">' + r.label + '</span>' +
+    '</div>' +
+    '<div class="card-value">' + desc + '</div>' +
+    tipHtml +
+  '</div>';
 }}
 
-function makeSection(id, title, badge, items, open) {{
-  const cards = items.map(makeCard).join('');
-  return `<div class="section ${{open ? 'open' : ''}}" id="${{id}}">
-    <div class="section-header" onclick="this.parentElement.classList.toggle('open')">
-      <div class="section-title">${{title}} ${{badge}}</div>
-      <span class="section-arrow">▶</span>
-    </div>
-    <div class="section-body">${{cards}}</div>
-  </div>`;
+function makeSection(id, title, badge, items, isOpen) {{
+  var cards = items.map(makeCard).join('');
+  return '<div class="section ' + (isOpen ? 'open' : '') + '" id="' + id + '">' +
+    '<div class="section-header">' +
+      '<div class="section-title">' + title + ' ' + badge + '</div>' +
+      '<span class="section-arrow">▶</span>' +
+    '</div>' +
+    '<div class="section-body">' + cards + '</div>' +
+  '</div>';
 }}
 
 function countBadge(items) {{
-  const g = items.filter(f => (f.severity||f.risk)==='green').length;
-  const y = items.filter(f => (f.severity||f.risk)==='yellow').length;
-  const r = items.filter(f => (f.severity||f.risk)==='red').length;
-  let parts = [];
-  if (r) parts.push(`<span class="badge badge-red">${{r}}</span>`);
-  if (y) parts.push(`<span class="badge badge-yellow">${{y}}</span>`);
-  if (g) parts.push(`<span class="badge badge-green">${{g}}</span>`);
+  var g2 = items.filter(function(f) {{ return (f.severity||f.risk)==='green'; }}).length;
+  var y2 = items.filter(function(f) {{ return (f.severity||f.risk)==='yellow'; }}).length;
+  var r2 = items.filter(function(f) {{ return (f.severity||f.risk)==='red'; }}).length;
+  var parts = [];
+  if (r2) parts.push('<span class="badge badge-red">' + r2 + '</span>');
+  if (y2) parts.push('<span class="badge badge-yellow">' + y2 + '</span>');
+  if (g2) parts.push('<span class="badge badge-green">' + g2 + '</span>');
   return parts.join(' ');
 }}
 
-// ── Render network sections ──
-const netGroups = groupByCategory(networkFindings);
-let netHtml = '';
-for (const [cat, items] of Object.entries(netGroups)) {{
-  const title = categoryTitles[cat] || cat;
-  const hasIssues = items.some(f => f.severity !== 'green');
+// ── Render network sections (tab 2) ──
+var netGroups = groupByCategory(networkFindings);
+var netHtml = '';
+networkCats.forEach(function(cat) {{
+  var items = netGroups[cat];
+  if (!items) return;
+  var title = categoryTitles[cat] || cat;
+  var hasIssues = items.some(function(f) {{ return f.severity !== 'green'; }});
   netHtml += makeSection('net-' + cat, title, countBadge(items), items, hasIssues);
-}}
+}});
 document.getElementById('network-sections').innerHTML = netHtml;
 
+// ── Render traffic sections (tab 3) ──
+var trafficHtml = '';
+trafficCats.forEach(function(cat) {{
+  var items = netGroups[cat];
+  if (!items) return;
+  // Show each traffic finding as its own section
+  items.forEach(function(f, i) {{
+    var sev = f.severity;
+    trafficHtml += makeSection('trf-' + i, f.title, countBadge([f]), [f], sev !== 'green');
+  }});
+}});
+if (!trafficHtml) {{
+  trafficHtml = '<div style="color:#64748b;font-size:14px;padding:20px 0">Ingen trafikanalys tillgänglig.</div>';
+}}
+document.getElementById('traffic-sections').innerHTML = trafficHtml;
+
+// ── Tab badges ──
+function setBadge(tabIndex, count, cls) {{
+  var slots = document.querySelectorAll('.tab-badge-slot');
+  if (slots[tabIndex] && count > 0) {{
+    slots[tabIndex].innerHTML = ' <span class="tab-badge ' + cls + '">' + count + '</span>';
+  }}
+}}
+function updateTabBadges() {{
+  var netFindings = networkFindings.filter(function(f) {{ return networkCats.indexOf(f.category) !== -1; }});
+  var netR = netFindings.filter(function(f) {{ return f.severity === 'red'; }}).length;
+  var netY = netFindings.filter(function(f) {{ return f.severity === 'yellow'; }}).length;
+  if (netR) setBadge(1, netR, 'tab-badge-red');
+  else if (netY) setBadge(1, netY, 'tab-badge-yellow');
+
+  var trfFindings = networkFindings.filter(function(f) {{ return trafficCats.indexOf(f.category) !== -1; }});
+  var trfR = trfFindings.filter(function(f) {{ return f.severity === 'red'; }}).length;
+  var trfY = trfFindings.filter(function(f) {{ return f.severity === 'yellow'; }}).length;
+  if (trfR) setBadge(2, trfR, 'tab-badge-red');
+  else if (trfY) setBadge(2, trfY, 'tab-badge-yellow');
+}}
+updateTabBadges();
+
+// ── Section collapse/expand (event delegation without inline handlers) ──
+document.addEventListener('click', function(e) {{
+  var header = e.target;
+  while (header && !header.classList.contains('section-header')) {{
+    header = header.parentElement;
+  }}
+  if (!header) return;
+  var sec = header.parentElement;
+  if (sec && sec.classList.contains('section')) {{
+    if (sec.className.indexOf('open') !== -1) {{
+      sec.className = 'section';
+    }} else {{
+      sec.className = 'section open';
+    }}
+  }}
+}});
+
 // ── Browser fingerprint analysis (runs live in browser) ──
-const browserFindings = [];
+var browserFindings = [];
 function addBF(category, title, value, risk, tip) {{
-  browserFindings.push({{ category, title, value, risk, tip: tip || '' }});
+  browserFindings.push({{ category: category, title: title, value: value, risk: risk, tip: tip || '' }});
 }}
 
 {fp_js}
 
 // ── After browser analysis: render everything ──
 setTimeout(function() {{
-  // Browser sections
-  const bGroups = groupByCategory(browserFindings.map(f => ({{
-    category: f.category, title: f.title, description: f.value,
-    severity: f.risk, recommendation: f.tip
-  }})));
-  let bHtml = '';
-  for (const [cat, items] of Object.entries(bGroups)) {{
-    const hasIssues = items.some(f => f.severity !== 'green');
+  // Browser sections (tab 4)
+  var bGroups = groupByCategory(browserFindings.map(function(f) {{
+    return {{
+      category: f.category, title: f.title, description: f.value,
+      severity: f.risk, recommendation: f.tip
+    }};
+  }}));
+  var bHtml = '';
+  for (var cat in bGroups) {{
+    var items = bGroups[cat];
+    var hasIssues = items.some(function(f) {{ return f.severity !== 'green'; }});
     bHtml += makeSection('br-' + cat, '🔍 ' + cat, countBadge(items), items, hasIssues);
   }}
   document.getElementById('browser-sections').innerHTML = bHtml;
 
-  // ── Combined score ──
-  const all = [
-    ...networkFindings.map(f => f.severity),
-    ...browserFindings.map(f => f.risk)
-  ];
-  const totalG = all.filter(s => s==='green').length;
-  const totalY = all.filter(s => s==='yellow').length;
-  const totalR = all.filter(s => s==='red').length;
-  const total = all.length;
-  const weights = {{ green: 0, yellow: 1, red: 3 }};
-  const points = all.reduce((s, r) => s + weights[r], 0);
-  const rawScore = Math.round((points / (total * 3)) * 100);
+  // Fingerprint tab badge
+  var fpR = browserFindings.filter(function(f) {{ return f.risk === 'red'; }}).length;
+  var fpY = browserFindings.filter(function(f) {{ return f.risk === 'yellow'; }}).length;
+  if (fpR) setBadge(3, fpR, 'tab-badge-red');
+  else if (fpY) setBadge(3, fpY, 'tab-badge-yellow');
+
+  // ── Combined score (overview tab) ──
+  var all = networkFindings.map(function(f) {{ return f.severity; }})
+    .concat(browserFindings.map(function(f) {{ return f.risk; }}));
+  var totalG = all.filter(function(s) {{ return s==='green'; }}).length;
+  var totalY = all.filter(function(s) {{ return s==='yellow'; }}).length;
+  var totalR = all.filter(function(s) {{ return s==='red'; }}).length;
+  var total = all.length;
+  var weights = {{ green: 0, yellow: 1, red: 3 }};
+  var points = all.reduce(function(s, r) {{ return s + weights[r]; }}, 0);
+  var rawScore = Math.round((points / (total * 3)) * 100);
 
   // Uniqueness bits from browser
-  let uniqueBits = 0;
-  browserFindings.forEach(f => {{
+  var uniqueBits = 0;
+  browserFindings.forEach(function(f) {{
     if (f.title === 'Canvas Fingerprint' && f.risk !== 'green') uniqueBits += 12;
     else if (f.title === 'WebGL Renderer' && f.risk === 'red') uniqueBits += 8;
     else if (f.title === 'Detekterade typsnitt') uniqueBits += 4;
@@ -401,7 +703,7 @@ setTimeout(function() {{
     else if (f.risk === 'yellow') uniqueBits += 1;
   }});
 
-  let uniqueness, uniqueLabel, uniqueColor;
+  var uniqueness, uniqueLabel, uniqueColor;
   if (uniqueBits >= 33) {{
     uniqueness = 'Mycket hög'; uniqueLabel = 'Din webbläsare har ett nästan unikt fingeravtryck.'; uniqueColor = '#ef4444';
   }} else if (uniqueBits >= 20) {{
@@ -412,66 +714,91 @@ setTimeout(function() {{
     uniqueness = 'Låg'; uniqueLabel = 'Svårt att skilja dig från andra.'; uniqueColor = '#10b981';
   }}
 
-  let gc;
+  var gc;
   if (rawScore <= 30) gc = '#10b981';
   else if (rawScore <= 60) gc = '#f59e0b';
   else gc = '#ef4444';
 
-  document.getElementById('score-area').innerHTML = `
-    <div style="text-align:center;padding:32px 20px 24px;margin-bottom:20px;
-      border-radius:18px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06)">
-      <div style="position:relative;width:130px;height:130px;margin:0 auto 16px">
-        <svg viewBox="0 0 140 140" style="transform:rotate(-90deg)">
-          <circle cx="70" cy="70" r="60" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="10"/>
-          <circle cx="70" cy="70" r="60" fill="none" stroke="${{gc}}" stroke-width="10"
-            stroke-dasharray="${{Math.round(rawScore * 3.77)}} 377" stroke-linecap="round"/>
-        </svg>
-        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
-          <div style="font-size:34px;font-weight:800;color:${{gc}}">${{rawScore}}</div>
-          <div style="font-size:11px;color:#64748b;text-transform:uppercase">av 100</div>
-        </div>
-      </div>
-      <div style="font-size:16px;font-weight:700;margin-bottom:4px">Sammanlagd riskpoäng</div>
-      <div style="font-size:13px;color:#94a3b8;max-width:420px;margin:0 auto">
-        ${{rawScore <= 30 ? 'Bra! Låg exponering.' : rawScore <= 60 ? 'Förbättringsmöjligheter finns.' : 'Hög exponering.'}}
-      </div>
-    </div>
-    <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">
-      <div style="flex:1;min-width:200px;padding:16px 20px;border-radius:14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06)">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <span style="font-size:13px;font-weight:700">🧬 Spårbarhet</span>
-          <span style="font-size:13px;font-weight:700;color:${{uniqueColor}}">${{uniqueness}}</span>
-        </div>
-        <div style="font-size:12px;color:#94a3b8;margin-bottom:10px">${{uniqueLabel}}</div>
-        <div style="height:5px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden">
-          <div style="height:100%;width:${{Math.min(uniqueBits/40*100,100)}}%;background:${{uniqueColor}};border-radius:3px"></div>
-        </div>
-        <div style="font-size:10px;color:#475569;margin-top:4px">${{uniqueBits}} bitar</div>
-      </div>
-      <div style="flex:1;min-width:200px;padding:16px 20px;border-radius:14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06)">
-        <div style="font-size:13px;font-weight:700;margin-bottom:10px">📊 Resultat</div>
-        <div style="display:flex;gap:14px;font-size:13px;color:#94a3b8">
-          <span>🟢 <strong style="color:#e2e8f0">${{totalG}}</strong></span>
-          <span>🟡 <strong style="color:#e2e8f0">${{totalY}}</strong></span>
-          <span>🔴 <strong style="color:#e2e8f0">${{totalR}}</strong></span>
-        </div>
-        <div style="font-size:11px;color:#475569;margin-top:6px">${{total}} kontroller totalt</div>
-      </div>
-    </div>`;
+  document.getElementById('score-area').innerHTML =
+    '<div style="text-align:center;padding:32px 20px 24px;margin-bottom:20px;' +
+      'border-radius:18px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06)">' +
+      '<div style="position:relative;width:130px;height:130px;margin:0 auto 16px">' +
+        '<svg viewBox="0 0 140 140" style="transform:rotate(-90deg)">' +
+          '<circle cx="70" cy="70" r="60" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="10"/>' +
+          '<circle cx="70" cy="70" r="60" fill="none" stroke="' + gc + '" stroke-width="10"' +
+            ' stroke-dasharray="' + Math.round(rawScore * 3.77) + ' 377" stroke-linecap="round"/>' +
+        '</svg>' +
+        '<div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">' +
+          '<div style="font-size:34px;font-weight:800;color:' + gc + '">' + rawScore + '</div>' +
+          '<div style="font-size:11px;color:#64748b;text-transform:uppercase">av 100</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="font-size:16px;font-weight:700;margin-bottom:4px">Sammanlagd riskpoäng</div>' +
+      '<div style="font-size:13px;color:#94a3b8;max-width:420px;margin:0 auto">' +
+        (rawScore <= 30 ? 'Bra! Låg exponering.' : rawScore <= 60 ? 'Förbättringsmöjligheter finns.' : 'Hög exponering.') +
+      '</div>' +
+    '</div>' +
+    '<div class="score-grid">' +
+      '<div class="score-box">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+          '<span style="font-size:13px;font-weight:700">🧬 Spårbarhet</span>' +
+          '<span style="font-size:13px;font-weight:700;color:' + uniqueColor + '">' + uniqueness + '</span>' +
+        '</div>' +
+        '<div style="font-size:12px;color:#94a3b8;margin-bottom:10px">' + uniqueLabel + '</div>' +
+        '<div style="height:5px;background:rgba(255,255,255,0.06);border-radius:3px;overflow:hidden">' +
+          '<div style="height:100%;width:' + Math.min(uniqueBits/40*100,100) + '%;background:' + uniqueColor + ';border-radius:3px"></div>' +
+        '</div>' +
+        '<div style="font-size:10px;color:#475569;margin-top:4px">' + uniqueBits + ' bitar</div>' +
+      '</div>' +
+      '<div class="score-box">' +
+        '<div style="font-size:13px;font-weight:700;margin-bottom:10px">📊 Resultat</div>' +
+        '<div style="display:flex;gap:14px;font-size:13px;color:#94a3b8">' +
+          '<span>🟢 <strong style="color:#e2e8f0">' + totalG + '</strong></span>' +
+          '<span>🟡 <strong style="color:#e2e8f0">' + totalY + '</strong></span>' +
+          '<span>🔴 <strong style="color:#e2e8f0">' + totalR + '</strong></span>' +
+        '</div>' +
+        '<div style="font-size:11px;color:#475569;margin-top:6px">' + total + ' kontroller totalt</div>' +
+      '</div>' +
+    '</div>';
+
+  // Collect all red findings with details
+  var redDetails = [];
+  networkFindings.forEach(function(f) {{
+    if (f.severity === 'red') redDetails.push(esc(f.title) + ': ' + esc(f.description.split('\\n')[0]));
+  }});
+  browserFindings.forEach(function(f) {{
+    if (f.risk === 'red') redDetails.push(esc(f.title) + ': ' + esc(f.value));
+  }});
 
   // Verdict
-  let vHtml;
+  var vHtml;
   if (totalR > 0) {{
-    vHtml = `<div style="margin-top:24px;padding:16px 20px;border-radius:12px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);color:#fca5a5;font-size:14px">
-      ⚠️ <strong>${{totalR}} risker</strong> hittades som bör åtgärdas.</div>`;
+    var detailList = redDetails.map(function(d) {{
+      return '<div style="font-size:12px;padding:3px 0">❌ ' + d + '</div>';
+    }}).join('');
+    vHtml = '<div style="margin-top:24px;padding:16px 20px;border-radius:12px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);color:#fca5a5;font-size:14px">' +
+      '⚠️ <strong>' + totalR + ' risker</strong> hittades som bör åtgärdas.' +
+      '<div style="margin-top:10px">' + detailList + '</div></div>';
   }} else if (totalY > 0) {{
-    vHtml = `<div style="margin-top:24px;padding:16px 20px;border-radius:12px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);color:#fcd34d;font-size:14px">
-      ⚡ Inga akuta problem, men <strong>${{totalY}} saker</strong> kan förbättras.</div>`;
+    vHtml = '<div style="margin-top:24px;padding:16px 20px;border-radius:12px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);color:#fcd34d;font-size:14px">' +
+      '⚡ Inga akuta problem, men <strong>' + totalY + ' saker</strong> kan förbättras.</div>';
   }} else {{
-    vHtml = `<div style="margin-top:24px;padding:16px 20px;border-radius:12px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);color:#6ee7b7;font-size:14px">
-      ✓ Allt ser bra ut!</div>`;
+    vHtml = '<div style="margin-top:24px;padding:16px 20px;border-radius:12px;background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);color:#6ee7b7;font-size:14px">' +
+      '✓ Allt ser bra ut!</div>';
   }}
   document.getElementById('verdict-area').innerHTML = vHtml;
+
+  // Add fingerprint findings to AI analysis card
+  var fpSection = document.getElementById('ai-fp-section');
+  if (fpSection) {{
+    var fpItems = '';
+    browserFindings.forEach(function(f) {{
+      var icon = f.risk === 'green' ? '✅' : f.risk === 'yellow' ? '⚠️' : '❌';
+      fpItems += '<div style="font-size:13px;color:#cbd5e1;padding:4px 0;line-height:1.5">' +
+        icon + ' ' + esc(f.title) + ': ' + esc(f.value) + '</div>';
+    }});
+    fpSection.innerHTML = '<div style="font-size:14px;font-weight:700;margin-bottom:6px;color:#e2e8f0">🔍 Webbläsar-fingeravtryck</div>' + fpItems;
+  }}
 }}, 400);
 </script>
 </body>
@@ -622,6 +949,52 @@ def _get_fingerprint_js() -> str:
   var plugins = Array.from(navigator.plugins || []).map(function(p){return p.name}).filter(Boolean);
   addBF('Fingeravtryck', 'Webbläsarplugins', plugins.length > 0 ? plugins.join(', ') : 'Inga',
     plugins.length > 2 ? 'yellow' : 'green');
+
+  // ── Permissions API ──
+  if (navigator.permissions) {
+    var permNames = ['camera', 'microphone', 'notifications', 'geolocation'];
+    var permResults = [];
+    var permDone = 0;
+    permNames.forEach(function(name) {
+      navigator.permissions.query({name: name}).then(function(result) {
+        permResults.push(name + ': ' + result.state);
+        permDone++;
+        if (permDone === permNames.length) {
+          var granted = permResults.filter(function(r) { return r.indexOf('granted') !== -1; });
+          var risk = granted.length >= 2 ? 'red' : granted.length === 1 ? 'yellow' : 'green';
+          var tip = granted.length > 0 ? 'Granska beviljade behörigheter i webbläsarens inställningar.' : '';
+          addBF('Behörigheter', 'Webbläsarbehörigheter', permResults.join(', '), risk, tip);
+        }
+      }).catch(function() {
+        permDone++;
+        if (permDone === permNames.length && permResults.length > 0) {
+          addBF('Behörigheter', 'Webbläsarbehörigheter', permResults.join(', '), 'green', '');
+        }
+      });
+    });
+  }
+
+  // ── Battery API ──
+  if (navigator.getBattery) {
+    try {
+      navigator.getBattery().then(function(battery) {
+        var level = Math.round(battery.level * 100) + '%';
+        var charging = battery.charging ? 'Laddar' : 'Batteri';
+        addBF('Hårdvara', 'Batteristatus', charging + ' (' + level + ')',
+          'yellow', 'Battery API kan användas för fingerprinting.');
+      }).catch(function() {});
+    } catch(e) {}
+  }
+
+  // ── Network Information API ──
+  if (navigator.connection) {
+    var conn = navigator.connection;
+    var connInfo = 'Typ: ' + (conn.effectiveType || 'okänd');
+    if (conn.downlink) connInfo += ', Bandbredd: ~' + conn.downlink + ' Mbps';
+    if (conn.rtt) connInfo += ', RTT: ' + conn.rtt + ' ms';
+    addBF('Hårdvara', 'Nätverksinfo', connInfo, 'yellow',
+      'Network Information API avslöjar din anslutningstyp.');
+  }
 """
 
 

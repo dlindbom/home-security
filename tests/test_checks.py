@@ -11,6 +11,11 @@ from scanner.checks import (
     check_active_connections,
     check_processes,
     check_traffic,
+    check_sip,
+    check_gatekeeper,
+    check_filevault,
+    check_auto_updates,
+    check_arp_table,
     run_all_checks,
     _classify_ip,
     _check_code_signatures,
@@ -428,6 +433,143 @@ class TestCheckTraffic(unittest.TestCase):
         self.assertGreaterEqual(len(findings), 3)
 
 
+# ── SIP ───────────────────────────────────────────────────────────────────────
+
+class TestCheckSip(unittest.TestCase):
+    @patch("scanner.checks.run_command")
+    def test_sip_enabled(self, mock_cmd):
+        mock_cmd.return_value = ("System Integrity Protection status: enabled.", "", 0)
+        findings = check_sip()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.GREEN)
+
+    @patch("scanner.checks.run_command")
+    def test_sip_disabled(self, mock_cmd):
+        mock_cmd.return_value = ("System Integrity Protection status: disabled.", "", 0)
+        findings = check_sip()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.RED)
+
+    @patch("scanner.checks.run_command")
+    def test_sip_command_fails(self, mock_cmd):
+        mock_cmd.return_value = ("", "error", 1)
+        findings = check_sip()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
+# ── Gatekeeper ────────────────────────────────────────────────────────────────
+
+class TestCheckGatekeeper(unittest.TestCase):
+    @patch("scanner.checks.run_command")
+    def test_gatekeeper_enabled(self, mock_cmd):
+        mock_cmd.return_value = ("assessments enabled", "", 0)
+        findings = check_gatekeeper()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.GREEN)
+
+    @patch("scanner.checks.run_command")
+    def test_gatekeeper_disabled(self, mock_cmd):
+        mock_cmd.return_value = ("assessments disabled", "", 0)
+        findings = check_gatekeeper()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.RED)
+
+
+# ── FileVault ─────────────────────────────────────────────────────────────────
+
+class TestCheckFilevault(unittest.TestCase):
+    @patch("scanner.checks.run_command")
+    def test_filevault_on(self, mock_cmd):
+        mock_cmd.return_value = ("FileVault is On.", "", 0)
+        findings = check_filevault()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.GREEN)
+
+    @patch("scanner.checks.run_command")
+    def test_filevault_off(self, mock_cmd):
+        mock_cmd.return_value = ("FileVault is Off.", "", 0)
+        findings = check_filevault()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.RED)
+
+    @patch("scanner.checks.run_command")
+    def test_filevault_command_fails(self, mock_cmd):
+        mock_cmd.return_value = ("", "error", 1)
+        findings = check_filevault()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
+# ── Auto Updates ──────────────────────────────────────────────────────────────
+
+class TestCheckAutoUpdates(unittest.TestCase):
+    @patch("scanner.checks.run_command")
+    def test_all_enabled(self, mock_cmd):
+        def side_effect(cmd):
+            if "AutomaticCheckEnabled" in cmd:
+                return ("1", "", 0)
+            if "AutomaticDownload" in cmd:
+                return ("1", "", 0)
+            if "AutomaticallyInstallMacOSUpdates" in cmd:
+                return ("1", "", 0)
+            return ("", "", 1)
+        mock_cmd.side_effect = side_effect
+        findings = check_auto_updates()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.GREEN)
+
+    @patch("scanner.checks.run_command")
+    def test_check_disabled(self, mock_cmd):
+        def side_effect(cmd):
+            if "AutomaticCheckEnabled" in cmd:
+                return ("0", "", 0)
+            if "AutomaticDownload" in cmd:
+                return ("0", "", 0)
+            if "AutomaticallyInstallMacOSUpdates" in cmd:
+                return ("0", "", 0)
+            return ("", "", 1)
+        mock_cmd.side_effect = side_effect
+        findings = check_auto_updates()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
+# ── ARP Table ─────────────────────────────────────────────────────────────────
+
+class TestCheckArpTable(unittest.TestCase):
+    @patch("scanner.checks.run_command")
+    def test_no_duplicates(self, mock_cmd):
+        mock_cmd.return_value = (
+            "router (192.168.1.1) at aa:bb:cc:dd:ee:01 on en0\n"
+            "device (192.168.1.2) at aa:bb:cc:dd:ee:02 on en0\n",
+            "", 0
+        )
+        findings = check_arp_table()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.GREEN)
+        self.assertIn("2 enheter", findings[0].description)
+
+    @patch("scanner.checks.run_command")
+    def test_duplicate_mac_is_red(self, mock_cmd):
+        mock_cmd.return_value = (
+            "router (192.168.1.1) at aa:bb:cc:dd:ee:01 on en0\n"
+            "fake (192.168.1.99) at aa:bb:cc:dd:ee:01 on en0\n",
+            "", 0
+        )
+        findings = check_arp_table()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.RED)
+        self.assertIn("ARP-spoofing", findings[0].description)
+
+    @patch("scanner.checks.run_command")
+    def test_arp_command_fails(self, mock_cmd):
+        mock_cmd.return_value = ("", "error", 1)
+        findings = check_arp_table()
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
 class TestRunAllChecks(unittest.TestCase):
     @patch("scanner.checks.check_firewall", return_value=[])
     @patch("scanner.checks.check_wifi", return_value=[])
@@ -436,6 +578,11 @@ class TestRunAllChecks(unittest.TestCase):
     @patch("scanner.checks.check_active_connections", return_value=[])
     @patch("scanner.checks.check_processes", return_value=[])
     @patch("scanner.checks.check_traffic", return_value=[])
+    @patch("scanner.checks.check_sip", return_value=[])
+    @patch("scanner.checks.check_gatekeeper", return_value=[])
+    @patch("scanner.checks.check_filevault", return_value=[])
+    @patch("scanner.checks.check_auto_updates", return_value=[])
+    @patch("scanner.checks.check_arp_table", return_value=[])
     def test_returns_combined(self, *mocks):
         findings = run_all_checks()
         self.assertEqual(findings, [])

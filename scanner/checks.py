@@ -1,4 +1,4 @@
-"""Security checks for macOS — firewall, WiFi, DNS, ports, connections, processes, traffic."""
+"""Security checks for macOS — firewall, WiFi, DNS, ports, connections, processes, traffic, home network."""
 
 import datetime
 import ipaddress
@@ -6,6 +6,8 @@ import json
 import os
 import plistlib
 import re
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from scanner.utils import (
@@ -1060,6 +1062,632 @@ def check_arp_table() -> list[Finding]:
     return findings
 
 
+# ── Hemnätverksanalys ────────────────────────────────────────────────────────
+
+# OUI database – top ~100 vendors for home network device identification
+_OUI_DB: dict[str, str] = {
+    # Apple
+    "00:1c:b3": "Apple", "00:1e:c2": "Apple", "00:25:00": "Apple",
+    "00:26:bb": "Apple", "00:3e:e1": "Apple", "00:50:e4": "Apple",
+    "00:cd:fe": "Apple", "18:ee:69": "Apple", "28:6a:ba": "Apple",
+    "3c:22:fb": "Apple", "40:b3:95": "Apple", "48:d7:05": "Apple",
+    "54:26:96": "Apple", "5c:f7:e6": "Apple", "60:03:08": "Apple",
+    "64:70:02": "Apple", "68:5b:35": "Apple", "70:de:e2": "Apple",
+    "7c:d1:c3": "Apple", "80:e6:50": "Apple", "88:66:a5": "Apple",
+    "8c:85:90": "Apple", "98:01:a7": "Apple", "a4:83:e7": "Apple",
+    "ac:bc:32": "Apple", "b0:34:95": "Apple", "b8:e8:56": "Apple",
+    "c8:2a:14": "Apple", "d0:81:7a": "Apple", "dc:a9:04": "Apple",
+    "e0:b5:5f": "Apple", "f0:18:98": "Apple", "f4:5c:89": "Apple",
+    # Samsung
+    "00:07:ab": "Samsung", "00:12:fb": "Samsung", "00:15:99": "Samsung",
+    "00:16:32": "Samsung", "00:21:19": "Samsung", "08:d4:6a": "Samsung",
+    "10:d5:42": "Samsung", "18:3a:2d": "Samsung", "34:23:ba": "Samsung",
+    "50:01:bb": "Samsung", "78:47:1d": "Samsung", "84:25:db": "Samsung",
+    "94:35:0a": "Samsung", "bc:72:b1": "Samsung", "c4:73:1e": "Samsung",
+    "f0:25:b7": "Samsung",
+    # Google
+    "00:1a:11": "Google", "3c:5a:b4": "Google", "54:60:09": "Google",
+    "94:eb:2c": "Google", "f4:f5:d8": "Google",
+    # Netgear
+    "00:09:5b": "Netgear", "00:14:6c": "Netgear", "00:1e:2a": "Netgear",
+    "00:24:b2": "Netgear", "10:0c:6b": "Netgear", "20:0c:c8": "Netgear",
+    "a4:2b:8c": "Netgear", "c4:04:15": "Netgear",
+    # TP-Link
+    "00:27:19": "TP-Link", "14:cc:20": "TP-Link", "50:c7:bf": "TP-Link",
+    "60:32:b1": "TP-Link", "b0:4e:26": "TP-Link", "c0:25:e9": "TP-Link",
+    "ec:08:6b": "TP-Link",
+    # ASUS
+    "00:0c:6e": "ASUS", "00:15:f2": "ASUS", "04:d4:c4": "ASUS",
+    "1c:87:2c": "ASUS", "2c:fd:a1": "ASUS", "ac:22:05": "ASUS",
+    # D-Link
+    "00:05:5d": "D-Link", "00:11:95": "D-Link", "00:19:5b": "D-Link",
+    "1c:7e:e5": "D-Link", "28:10:7b": "D-Link", "b8:a3:86": "D-Link",
+    # Cisco
+    "00:00:0c": "Cisco", "00:1a:2b": "Cisco",
+    # Sonos
+    "00:0e:58": "Sonos", "5c:aa:fd": "Sonos", "78:28:ca": "Sonos",
+    "b8:e9:37": "Sonos",
+    # Amazon (Echo, etc.)
+    "00:71:47": "Amazon", "10:ce:a9": "Amazon", "14:91:82": "Amazon",
+    "34:d2:70": "Amazon", "68:54:fd": "Amazon", "fc:65:de": "Amazon",
+    # Raspberry Pi
+    "b8:27:eb": "Raspberry Pi", "dc:a6:32": "Raspberry Pi",
+    "e4:5f:01": "Raspberry Pi",
+    # Intel
+    "00:02:b3": "Intel", "00:13:e8": "Intel", "00:1b:21": "Intel",
+    "3c:97:0e": "Intel", "68:05:ca": "Intel",
+    # VMware
+    "00:50:56": "VMware", "00:0c:29": "VMware",
+    # Microsoft
+    "00:15:5d": "Microsoft (Hyper-V)",
+    # Espressif (IoT)
+    "24:0a:c4": "Espressif (IoT)", "30:ae:a4": "Espressif (IoT)",
+    "a4:cf:12": "Espressif (IoT)",
+    # Philips Hue
+    "00:17:88": "Philips Hue",
+    # Ring
+    "24:ec:99": "Ring",
+    # Ubiquiti
+    "04:18:d6": "Ubiquiti", "24:5a:4c": "Ubiquiti",
+    "78:8a:20": "Ubiquiti", "f0:9f:c2": "Ubiquiti",
+    # Linksys
+    "00:04:5a": "Linksys", "00:0c:41": "Linksys", "20:aa:4b": "Linksys",
+    # Brother (printers)
+    "00:1b:a9": "Brother", "00:80:77": "Brother",
+    # HP (printers)
+    "00:01:e6": "HP", "00:0b:cd": "HP", "00:14:38": "HP",
+    # Roku
+    "b0:a7:37": "Roku", "dc:3a:5e": "Roku",
+}
+
+
+def _oui_lookup(mac: str) -> str:
+    """Lookup vendor from first 3 octets of MAC address."""
+    # Normalize MAC: ensure each octet is zero-padded (e.g., "a:b:cc" → "0a:0b:cc")
+    parts = mac.lower().split(":")
+    if len(parts) >= 3:
+        normalized = ":".join(p.zfill(2) for p in parts[:3])
+        return _OUI_DB.get(normalized, "Okänd")
+    return "Okänd"
+
+
+def _get_gateway_ip() -> Optional[str]:
+    """Get LAN gateway IP. Uses networksetup for Wi-Fi to bypass VPN routing."""
+    # Try networksetup first (gives LAN router even when VPN is active)
+    stdout, _, rc = run_command(["networksetup", "-getinfo", "Wi-Fi"])
+    if rc == 0:
+        for line in stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Router:"):
+                router = stripped.split(":", 1)[1].strip()
+                if router and router != "none":
+                    return router
+    # Fallback to route command
+    stdout, _, rc = run_command(["route", "-n", "get", "default"])
+    if rc != 0:
+        return None
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("gateway:"):
+            return stripped.split(":", 1)[1].strip()
+    return None
+
+
+def _get_own_ip() -> Optional[str]:
+    """Get own IP on the local network. Uses en0 first to bypass VPN."""
+    # Try en0 (Wi-Fi) directly – works even when VPN is active
+    stdout, _, rc = run_command(["ipconfig", "getifaddr", "en0"])
+    if rc == 0 and stdout.strip():
+        return stdout.strip()
+    # Fallback: parse route for interface
+    stdout, _, rc = run_command(["route", "-n", "get", "default"])
+    if rc != 0:
+        return None
+    interface = None
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("interface:"):
+            interface = stripped.split(":", 1)[1].strip()
+            break
+    if not interface:
+        return None
+    stdout2, _, rc2 = run_command(["ipconfig", "getifaddr", interface])
+    if rc2 != 0:
+        return None
+    return stdout2.strip() or None
+
+
+def _get_local_subnet() -> Optional[str]:
+    """Get the /24 subnet prefix (e.g., '192.168.1') from own IP."""
+    own_ip = _get_own_ip()
+    if not own_ip:
+        return None
+    parts = own_ip.split(".")
+    if len(parts) == 4:
+        return ".".join(parts[:3])
+    return None
+
+
+def _parse_ping_stats(output: str) -> Optional[dict]:
+    """Parse ping output for min/avg/max/stddev and packet loss."""
+    if not output:
+        return None
+
+    stats: dict = {}
+
+    # Packet loss: "X packets transmitted, Y packets received, Z% packet loss"
+    loss_match = re.search(r"([\d.]+)% packet loss", output)
+    if loss_match:
+        stats["loss"] = float(loss_match.group(1))
+    else:
+        stats["loss"] = 0.0
+
+    # Round-trip: "min/avg/max/stddev = 1.234/5.678/9.012/3.456 ms"
+    rtt_match = re.search(
+        r"min/avg/max/stddev\s*=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)", output
+    )
+    if rtt_match:
+        stats["min"] = float(rtt_match.group(1))
+        stats["avg"] = float(rtt_match.group(2))
+        stats["max"] = float(rtt_match.group(3))
+        stats["stddev"] = float(rtt_match.group(4))
+        return stats
+
+    return None
+
+
+# Ports to scan on home network devices
+_HOME_SCAN_PORTS = [22, 23, 53, 80, 443, 445, 548, 554, 631, 5000, 5353, 8080, 8443, 8009, 9100, 32400]
+
+# Risky ports on home network devices
+_HOME_RISKY_PORTS: dict[int, tuple[str, Severity, str]] = {
+    23: ("Telnet", Severity.RED, "Telnet är okrypterat. Stäng av och använd SSH istället."),
+    445: ("SMB", Severity.YELLOW, "SMB-fildelning exponerad. Kontrollera åtkomst."),
+    554: ("RTSP", Severity.YELLOW, "RTSP (kameraprotokoll) öppet. Kontrollera kamerasäkerhet."),
+    9100: ("Skrivare (RAW)", Severity.YELLOW, "Skrivarport öppen. Begränsa till nödvändig åtkomst."),
+}
+
+
+def check_network_devices() -> list[Finding]:
+    """Discover devices on the local /24 subnet via ping sweep + ARP."""
+    findings: list[Finding] = []
+
+    subnet = _get_local_subnet()
+    gateway = _get_gateway_ip()
+    own_ip = _get_own_ip()
+
+    if not subnet:
+        findings.append(Finding(
+            category="home_network",
+            title="Enhetssökning misslyckades",
+            severity=Severity.YELLOW,
+            description="Kunde inte bestämma lokalt subnät.",
+            recommendation="Kontrollera att du är ansluten till ett nätverk.",
+        ))
+        return findings
+
+    # Ping sweep: concurrent pings to all 254 addresses
+    def _ping_ip(ip: str) -> bool:
+        _, _, rc = run_command(["ping", "-c", "1", "-W", "1", ip], timeout=5)
+        return rc == 0
+
+    responsive_ips: list[str] = []
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {}
+        for i in range(1, 255):
+            ip = f"{subnet}.{i}"
+            futures[executor.submit(_ping_ip, ip)] = ip
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                if future.result():
+                    responsive_ips.append(ip)
+            except Exception:
+                pass
+
+    # Parse ARP table to get MAC addresses for discovered devices
+    arp_out, _, arp_rc = run_command(["arp", "-a"])
+    ip_to_mac: dict[str, str] = {}
+    if arp_rc == 0:
+        for line in arp_out.splitlines():
+            match = re.match(r".*?\(([^)]+)\)\s+at\s+([0-9a-f:]+)", line, re.IGNORECASE)
+            if match:
+                ip_to_mac[match.group(1)] = match.group(2).lower()
+
+    # Build device table
+    devices: list[dict[str, str]] = []
+    for ip in sorted(responsive_ips, key=lambda x: list(map(int, x.split(".")))):
+        mac = ip_to_mac.get(ip, "okänd")
+        vendor = _oui_lookup(mac) if mac != "okänd" else "Okänd"
+        label = ""
+        if ip == gateway:
+            label = " (router)"
+        elif ip == own_ip:
+            label = " (denna dator)"
+        devices.append({
+            "ip": ip,
+            "mac": mac,
+            "vendor": vendor,
+            "label": label,
+        })
+
+    # Format device table as description text
+    device_lines = []
+    for d in devices:
+        device_lines.append(
+            f"  {d['ip']:16s} {d['mac']:18s} {d['vendor']}{d['label']}"
+        )
+    table_header = f"  {'IP':16s} {'MAC':18s} Tillverkare"
+    table_str = table_header + "\n" + "\n".join(device_lines)
+
+    findings.append(Finding(
+        category="home_network",
+        title=f"{len(devices)} enheter hittades på nätverket",
+        severity=Severity.GREEN,
+        description=f"Subnät: {subnet}.0/24\n\n{table_str}",
+        raw_data={"devices": devices, "subnet": subnet},
+    ))
+
+    return findings
+
+
+def check_device_ports() -> list[Finding]:
+    """Scan common ports on discovered home network devices."""
+    findings: list[Finding] = []
+
+    gateway = _get_gateway_ip()
+    own_ip = _get_own_ip()
+
+    # Get devices from ARP table
+    arp_out, _, arp_rc = run_command(["arp", "-a"])
+    if arp_rc != 0:
+        findings.append(Finding(
+            category="home_network",
+            title="Portskanning misslyckades",
+            severity=Severity.YELLOW,
+            description="Kunde inte läsa ARP-tabellen för att hitta enheter.",
+        ))
+        return findings
+
+    device_ips: list[str] = []
+    for line in arp_out.splitlines():
+        match = re.match(r".*?\(([^)]+)\)\s+at\s+([0-9a-f:]+)", line, re.IGNORECASE)
+        if match:
+            ip = match.group(1)
+            mac = match.group(2)
+            if mac.lower() not in ("ff:ff:ff:ff:ff:ff", "(incomplete)"):
+                if ip != own_ip:
+                    device_ips.append(ip)
+
+    if not device_ips:
+        findings.append(Finding(
+            category="home_network",
+            title="Inga enheter att skanna",
+            severity=Severity.GREEN,
+            description="Inga andra enheter hittades i ARP-tabellen.",
+        ))
+        return findings
+
+    # Scan ports using socket.connect_ex
+    def _check_port(ip: str, port: int) -> Optional[tuple]:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            if result == 0:
+                return (ip, port)
+        except (OSError, socket.error):
+            pass
+        return None
+
+    open_ports: dict[str, list[int]] = {}  # ip -> [open ports]
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {}
+        for ip in device_ips:
+            for port in _HOME_SCAN_PORTS:
+                futures[executor.submit(_check_port, ip, port)] = (ip, port)
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result:
+                    ip, port = result
+                    open_ports.setdefault(ip, []).append(port)
+            except Exception:
+                pass
+
+    # Analyze results
+    risky_found: list[str] = []
+    worst_severity = Severity.GREEN
+
+    for ip, ports in sorted(open_ports.items()):
+        is_router = (ip == gateway)
+        for port in sorted(ports):
+            if port in _HOME_RISKY_PORTS:
+                service, sev, desc = _HOME_RISKY_PORTS[port]
+                risky_found.append(f"{ip}: port {port} ({service}) – {desc}")
+                if sev == Severity.RED:
+                    worst_severity = Severity.RED
+                elif worst_severity != Severity.RED:
+                    worst_severity = sev
+            elif port in (80, 8080) and not is_router:
+                risky_found.append(
+                    f"{ip}: port {port} (HTTP) – Webbserver på enhet som inte är routern."
+                )
+                if worst_severity == Severity.GREEN:
+                    worst_severity = Severity.YELLOW
+
+    if risky_found:
+        findings.append(Finding(
+            category="home_network",
+            title=f"{len(risky_found)} riskabla portar hittades",
+            severity=worst_severity,
+            description="\n".join(f"  • {r}" for r in risky_found),
+            recommendation="Stäng portar som inte behövs och kontrollera enhetssäkerheten.",
+            raw_data={"open_ports": {ip: ports for ip, ports in open_ports.items()}},
+        ))
+    else:
+        port_summary_lines = []
+        for ip, ports in sorted(open_ports.items()):
+            port_summary_lines.append(f"  {ip}: {', '.join(str(p) for p in sorted(ports))}")
+        desc = "Inga riskabla portar hittades på nätverkets enheter."
+        if port_summary_lines:
+            desc += "\n\nÖppna portar:\n" + "\n".join(port_summary_lines)
+        findings.append(Finding(
+            category="home_network",
+            title="Portskanning av hemnätverket",
+            severity=Severity.GREEN,
+            description=desc,
+            raw_data={"open_ports": {ip: ports for ip, ports in open_ports.items()}},
+        ))
+
+    return findings
+
+
+def check_dns_hijacking() -> list[Finding]:
+    """Check for DNS hijacking by querying non-existent domain and comparing resolvers."""
+    findings: list[Finding] = []
+
+    gateway = _get_gateway_ip()
+    if not gateway:
+        findings.append(Finding(
+            category="home_network",
+            title="DNS-kapningstest",
+            severity=Severity.YELLOW,
+            description="Kunde inte bestämma gateway-IP för DNS-test.",
+        ))
+        return findings
+
+    # Test 1: Query non-existent domain via router's DNS
+    nxdomain_out, _, nxdomain_rc = run_command(
+        ["dig", f"@{gateway}", "thisdomaindoesnotexist12345.com", "+short"],
+        timeout=10,
+    )
+    nxdomain_response = nxdomain_out.strip()
+
+    if nxdomain_response and re.match(r"\d+\.\d+\.\d+\.\d+", nxdomain_response):
+        findings.append(Finding(
+            category="home_network",
+            title="DNS-kapning detekterad!",
+            severity=Severity.RED,
+            description=(
+                f"Routerns DNS ({gateway}) returnerade IP {nxdomain_response} "
+                f"för en icke-existerande domän.\n"
+                f"Detta tyder på DNS-omdirigering (hijacking)."
+            ),
+            recommendation=(
+                "Kontrollera routerns DNS-inställningar. "
+                "Byt till en säkrare DNS som 1.1.1.1 eller 9.9.9.9."
+            ),
+            raw_data={"gateway": gateway, "nxdomain_ip": nxdomain_response},
+        ))
+    else:
+        findings.append(Finding(
+            category="home_network",
+            title="Ingen DNS-kapning",
+            severity=Severity.GREEN,
+            description=f"Routerns DNS ({gateway}) returnerade korrekt NXDOMAIN för okänd domän.",
+        ))
+
+    # Test 2: Cross-resolver comparison
+    router_out, _, router_rc = run_command(
+        ["dig", f"@{gateway}", "google.com", "+short"], timeout=10,
+    )
+    cf_out, _, cf_rc = run_command(
+        ["dig", "@1.1.1.1", "google.com", "+short"], timeout=10,
+    )
+
+    if router_rc == 0 and cf_rc == 0:
+        router_ips = set(router_out.strip().splitlines())
+        cf_ips = set(cf_out.strip().splitlines())
+        # Filter to only IP addresses (dig +short can return CNAME lines too)
+        router_ips = {ip for ip in router_ips if re.match(r"\d+\.\d+\.\d+\.\d+", ip)}
+        cf_ips = {ip for ip in cf_ips if re.match(r"\d+\.\d+\.\d+\.\d+", ip)}
+
+        if router_ips and cf_ips and not router_ips.intersection(cf_ips):
+            findings.append(Finding(
+                category="home_network",
+                title="DNS-svar skiljer sig mellan resolvers",
+                severity=Severity.YELLOW,
+                description=(
+                    f"Router ({gateway}): {', '.join(sorted(router_ips))}\n"
+                    f"Cloudflare (1.1.1.1): {', '.join(sorted(cf_ips))}\n"
+                    f"Olika IP-svar kan tyda på DNS-manipulation."
+                ),
+                recommendation="Överväg att använda en betrodd DNS-resolver direkt.",
+                raw_data={
+                    "router_ips": sorted(router_ips),
+                    "cloudflare_ips": sorted(cf_ips),
+                },
+            ))
+
+    return findings
+
+
+def check_network_quality() -> list[Finding]:
+    """Check network quality: latency to gateway and internet, packet loss."""
+    findings: list[Finding] = []
+
+    gateway = _get_gateway_ip()
+    if not gateway:
+        findings.append(Finding(
+            category="home_network",
+            title="Nätverkskvalitet",
+            severity=Severity.YELLOW,
+            description="Kunde inte bestämma gateway för kvalitetstest.",
+        ))
+        return findings
+
+    # Test 1: Gateway latency
+    gw_out, _, gw_rc = run_command(
+        ["ping", "-c", "10", "-i", "0.2", gateway], timeout=15,
+    )
+    gw_stats = _parse_ping_stats(gw_out)
+
+    # Test 2: Internet latency
+    inet_out, _, inet_rc = run_command(
+        ["ping", "-c", "5", "8.8.8.8"], timeout=15,
+    )
+    inet_stats = _parse_ping_stats(inet_out)
+
+    # Evaluate gateway quality
+    if gw_stats:
+        avg = gw_stats["avg"]
+        loss = gw_stats["loss"]
+        if avg < 10 and loss == 0.0:
+            sev = Severity.GREEN
+            desc = f"Gateway ({gateway}): {avg:.1f} ms genomsnitt, {loss:.0f}% förlust."
+        elif avg < 50 and loss < 5:
+            sev = Severity.YELLOW
+            desc = f"Gateway ({gateway}): {avg:.1f} ms genomsnitt, {loss:.0f}% förlust. Något förhöjd latens."
+        else:
+            sev = Severity.RED
+            desc = f"Gateway ({gateway}): {avg:.1f} ms genomsnitt, {loss:.0f}% förlust. Hög latens eller paketförlust!"
+
+        desc += f"\n  Min/Avg/Max/Stddev: {gw_stats['min']:.1f}/{avg:.1f}/{gw_stats['max']:.1f}/{gw_stats['stddev']:.1f} ms"
+
+        if inet_stats:
+            desc += f"\n  Internet (8.8.8.8): {inet_stats['avg']:.1f} ms genomsnitt, {inet_stats['loss']:.0f}% förlust."
+
+        findings.append(Finding(
+            category="home_network",
+            title="Nätverkskvalitet",
+            severity=sev,
+            description=desc,
+            recommendation="Kontrollera router och kabelanslutningar." if sev != Severity.GREEN else "",
+            raw_data={"gateway_stats": gw_stats, "internet_stats": inet_stats},
+        ))
+    else:
+        findings.append(Finding(
+            category="home_network",
+            title="Nätverkskvalitet",
+            severity=Severity.YELLOW,
+            description="Kunde inte mäta latens till gateway.",
+        ))
+
+    return findings
+
+
+def check_router_security() -> list[Finding]:
+    """Analyze router security: open ports and vendor identification."""
+    findings: list[Finding] = []
+
+    gateway = _get_gateway_ip()
+    if not gateway:
+        findings.append(Finding(
+            category="home_network",
+            title="Routeranalys",
+            severity=Severity.YELLOW,
+            description="Kunde inte bestämma gateway-IP.",
+        ))
+        return findings
+
+    # Get router MAC for vendor ID
+    arp_out, _, arp_rc = run_command(["arp", "-a"])
+    router_mac = None
+    if arp_rc == 0:
+        for line in arp_out.splitlines():
+            match = re.match(r".*?\(([^)]+)\)\s+at\s+([0-9a-f:]+)", line, re.IGNORECASE)
+            if match and match.group(1) == gateway:
+                router_mac = match.group(2).lower()
+                break
+
+    router_vendor = _oui_lookup(router_mac) if router_mac else "Okänd"
+
+    # Port scan router
+    router_ports = [22, 23, 80, 443, 8080, 8443]
+    open_router_ports: list[int] = []
+
+    def _check_router_port(port: int) -> Optional[int]:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex((gateway, port))
+            sock.close()
+            if result == 0:
+                return port
+        except (OSError, socket.error):
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(_check_router_port, p): p for p in router_ports}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if result is not None:
+                    open_router_ports.append(result)
+            except Exception:
+                pass
+
+    open_router_ports.sort()
+
+    # Analyze
+    issues: list[str] = []
+    worst_severity = Severity.GREEN
+
+    if 23 in open_router_ports:
+        issues.append("Telnet (port 23) är öppet – extremt osäkert för fjärradministration!")
+        worst_severity = Severity.RED
+
+    if 80 in open_router_ports and 443 not in open_router_ports:
+        issues.append("HTTP (port 80) utan HTTPS – administrationsgränssnittet saknar kryptering.")
+        if worst_severity == Severity.GREEN:
+            worst_severity = Severity.YELLOW
+
+    if 8080 in open_router_ports:
+        issues.append("Alternativ webbserver (port 8080) är öppen.")
+        if worst_severity == Severity.GREEN:
+            worst_severity = Severity.YELLOW
+
+    port_list = ", ".join(str(p) for p in open_router_ports) if open_router_ports else "inga"
+    desc = (
+        f"Router: {gateway}\n"
+        f"Tillverkare: {router_vendor}"
+        + (f" ({router_mac})" if router_mac else "") + "\n"
+        f"Öppna portar: {port_list}"
+    )
+    if issues:
+        desc += "\n\nProblem:\n" + "\n".join(f"  • {issue}" for issue in issues)
+
+    findings.append(Finding(
+        category="home_network",
+        title="Routersäkerhet",
+        severity=worst_severity,
+        description=desc,
+        recommendation="Stäng onödiga portar och aktivera HTTPS för routerns adminpanel."
+        if worst_severity != Severity.GREEN else "",
+        raw_data={
+            "gateway": gateway,
+            "vendor": router_vendor,
+            "mac": router_mac,
+            "open_ports": open_router_ports,
+        },
+    ))
+
+    return findings
+
+
 # ── Kör alla kontroller ──────────────────────────────────────────────────────
 
 def run_all_checks() -> list[Finding]:
@@ -1077,4 +1705,10 @@ def run_all_checks() -> list[Finding]:
     all_findings.extend(check_filevault())
     all_findings.extend(check_auto_updates())
     all_findings.extend(check_arp_table())
+    # Hemnätverksanalys
+    all_findings.extend(check_network_devices())
+    all_findings.extend(check_device_ports())
+    all_findings.extend(check_dns_hijacking())
+    all_findings.extend(check_network_quality())
+    all_findings.extend(check_router_security())
     return all_findings

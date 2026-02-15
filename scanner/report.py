@@ -89,6 +89,7 @@ def print_report(findings: list) -> None:
         "traffic": "Trafikanalys",
         "system": "Systemsäkerhet",
         "network_advanced": "Nätverksanalys",
+        "home_network": "Hemnätverk",
     }
 
     for cat, cat_findings in categories.items():
@@ -269,6 +270,15 @@ def _generate_ai_summary(findings: list) -> str:
             icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
             items.append(f"{icon} {_escape_html(f.title)}: {_escape_html(f.description.split(chr(10))[0])}")
         sections.append(_ai_section("🔬 Nätverksanalys", items))
+
+    # --- Home network ---
+    home_findings = cats.get("home_network", [])
+    if home_findings:
+        items = []
+        for f in home_findings:
+            icon = "✅" if f.severity == Severity.GREEN else "⚠️" if f.severity == Severity.YELLOW else "❌"
+            items.append(f"{icon} {_escape_html(f.title)}: {_escape_html(f.description.split(chr(10))[0])}")
+        sections.append(_ai_section("🏠 Hemnätverk", items))
 
     # --- Recommendations ---
     recs = []
@@ -452,6 +462,7 @@ def export_html(findings: list, filepath: str) -> None:
     <button class="tab-btn active" id="btn-overview">🛡️ Översikt<span class="tab-badge-slot"></span></button>
     <button class="tab-btn" id="btn-network">🔒 Nätverk<span class="tab-badge-slot"></span></button>
     <button class="tab-btn" id="btn-traffic">📡 Trafik<span class="tab-badge-slot"></span></button>
+    <button class="tab-btn" id="btn-home_network">🏠 Hemnätverk<span class="tab-badge-slot"></span></button>
     <button class="tab-btn" id="btn-fingerprint">🔍 Fingeravtryck<span class="tab-badge-slot"></span></button>
   </div>
 
@@ -478,7 +489,12 @@ def export_html(findings: list, filepath: str) -> None:
     <div id="traffic-sections"></div>
   </div>
 
-  <!-- Tab 4: Fingerprint -->
+  <!-- Tab 4: Home Network -->
+  <div class="tab-panel" id="panel-home_network">
+    <div id="home-network-sections"></div>
+  </div>
+
+  <!-- Tab 5: Fingerprint -->
   <div class="tab-panel" id="panel-fingerprint">
     <div id="browser-sections"></div>
   </div>
@@ -486,7 +502,7 @@ def export_html(findings: list, filepath: str) -> None:
 
 <script>
 // ── Tab switching ──
-var tabMap = ['overview','network','traffic','fingerprint'];
+var tabMap = ['overview','network','traffic','home_network','fingerprint'];
 function switchTab(idx) {{
   var btns = document.querySelectorAll('.tab-btn');
   var panels = document.querySelectorAll('.tab-panel');
@@ -498,7 +514,8 @@ function switchTab(idx) {{
 document.getElementById('btn-overview').addEventListener('click', function() {{ switchTab(0); }});
 document.getElementById('btn-network').addEventListener('click', function() {{ switchTab(1); }});
 document.getElementById('btn-traffic').addEventListener('click', function() {{ switchTab(2); }});
-document.getElementById('btn-fingerprint').addEventListener('click', function() {{ switchTab(3); }});
+document.getElementById('btn-home_network').addEventListener('click', function() {{ switchTab(3); }});
+document.getElementById('btn-fingerprint').addEventListener('click', function() {{ switchTab(4); }});
 
 // ── Network findings from scanner ──
 var networkFindings = {net_json};
@@ -522,12 +539,15 @@ var categoryTitles = {{
   traffic: '📡 Trafikanalys',
   system: '🖥️ Systemsäkerhet',
   network_advanced: '🔬 Nätverksanalys',
+  home_network: '🏠 Hemnätverk',
 }};
 
 // Network categories (tab 2)
 var networkCats = ['firewall','wifi','dns','open_ports','exposed_services','active_connections','process','system','network_advanced'];
 // Traffic categories (tab 3)
 var trafficCats = ['traffic'];
+// Home network categories (tab 4)
+var homeCats = ['home_network'];
 
 function groupByCategory(items) {{
   var groups = {{}};
@@ -605,6 +625,21 @@ if (!trafficHtml) {{
 }}
 document.getElementById('traffic-sections').innerHTML = trafficHtml;
 
+// ── Render home network sections (tab 4) ──
+var homeHtml = '';
+homeCats.forEach(function(cat) {{
+  var items = netGroups[cat];
+  if (!items) return;
+  items.forEach(function(f, i) {{
+    var sev = f.severity;
+    homeHtml += makeSection('home-' + i, f.title, countBadge([f]), [f], sev !== 'green');
+  }});
+}});
+if (!homeHtml) {{
+  homeHtml = '<div style="color:#64748b;font-size:14px;padding:20px 0">Hemnätverksanalys ej tillgänglig.</div>';
+}}
+document.getElementById('home-network-sections').innerHTML = homeHtml;
+
 // ── Tab badges ──
 function setBadge(tabIndex, count, cls) {{
   var slots = document.querySelectorAll('.tab-badge-slot');
@@ -624,6 +659,13 @@ function updateTabBadges() {{
   var trfY = trfFindings.filter(function(f) {{ return f.severity === 'yellow'; }}).length;
   if (trfR) setBadge(2, trfR, 'tab-badge-red');
   else if (trfY) setBadge(2, trfY, 'tab-badge-yellow');
+
+  // Home network tab badge (index 3)
+  var homeFindings = networkFindings.filter(function(f) {{ return homeCats.indexOf(f.category) !== -1; }});
+  var homeR = homeFindings.filter(function(f) {{ return f.severity === 'red'; }}).length;
+  var homeY = homeFindings.filter(function(f) {{ return f.severity === 'yellow'; }}).length;
+  if (homeR) setBadge(3, homeR, 'tab-badge-red');
+  else if (homeY) setBadge(3, homeY, 'tab-badge-yellow');
 }}
 updateTabBadges();
 
@@ -669,11 +711,11 @@ setTimeout(function() {{
   }}
   document.getElementById('browser-sections').innerHTML = bHtml;
 
-  // Fingerprint tab badge
+  // Fingerprint tab badge (index 4)
   var fpR = browserFindings.filter(function(f) {{ return f.risk === 'red'; }}).length;
   var fpY = browserFindings.filter(function(f) {{ return f.risk === 'yellow'; }}).length;
-  if (fpR) setBadge(3, fpR, 'tab-badge-red');
-  else if (fpY) setBadge(3, fpY, 'tab-badge-yellow');
+  if (fpR) setBadge(4, fpR, 'tab-badge-red');
+  else if (fpY) setBadge(4, fpY, 'tab-badge-yellow');
 
   // ── Combined score (overview tab) ──
   var all = networkFindings.map(function(f) {{ return f.severity; }})

@@ -16,12 +16,22 @@ from scanner.checks import (
     check_filevault,
     check_auto_updates,
     check_arp_table,
+    check_network_devices,
+    check_device_ports,
+    check_dns_hijacking,
+    check_network_quality,
+    check_router_security,
     run_all_checks,
     _classify_ip,
     _check_code_signatures,
     _classify_connections,
     _check_vpn_leak,
     _check_baseline_diff,
+    _oui_lookup,
+    _get_gateway_ip,
+    _get_own_ip,
+    _get_local_subnet,
+    _parse_ping_stats,
 )
 from scanner.utils import Severity, ConnectionInfo
 
@@ -570,6 +580,305 @@ class TestCheckArpTable(unittest.TestCase):
         self.assertEqual(findings[0].severity, Severity.YELLOW)
 
 
+# ── Hemnätverksanalys ────────────────────────────────────────────────────────
+
+
+class TestOuiLookup(unittest.TestCase):
+    def test_known_apple_mac(self):
+        self.assertEqual(_oui_lookup("ac:bc:32:aa:bb:cc"), "Apple")
+
+    def test_known_netgear_mac(self):
+        self.assertEqual(_oui_lookup("10:0c:6b:aa:bb:cc"), "Netgear")
+
+    def test_unknown_mac(self):
+        self.assertEqual(_oui_lookup("00:00:00:aa:bb:cc"), "Okänd")
+
+    def test_case_insensitive(self):
+        self.assertEqual(_oui_lookup("AC:BC:32:AA:BB:CC"), "Apple")
+
+
+class TestNetworkHelpers(unittest.TestCase):
+    @patch("scanner.checks.run_command")
+    def test_get_gateway_ip_via_networksetup(self, mock_cmd):
+        mock_cmd.return_value = (
+            "DHCP Configuration\n"
+            "IP address: 192.168.1.68\n"
+            "Subnet mask: 255.255.255.0\n"
+            "Router: 192.168.1.1\n",
+            "", 0,
+        )
+        self.assertEqual(_get_gateway_ip(), "192.168.1.1")
+
+    @patch("scanner.checks.run_command")
+    def test_get_gateway_ip_fallback_route(self, mock_cmd):
+        mock_cmd.side_effect = [
+            ("", "error", 1),  # networksetup fails
+            (
+                "   route to: default\n"
+                "    gateway: 10.5.0.2\n"
+                "  interface: utun4\n",
+                "", 0,
+            ),  # route works
+        ]
+        self.assertEqual(_get_gateway_ip(), "10.5.0.2")
+
+    @patch("scanner.checks.run_command")
+    def test_get_gateway_ip_fails(self, mock_cmd):
+        mock_cmd.side_effect = [
+            ("", "error", 1),  # networksetup fails
+            ("", "error", 1),  # route fails
+        ]
+        self.assertIsNone(_get_gateway_ip())
+
+    @patch("scanner.checks.run_command")
+    def test_get_own_ip_via_en0(self, mock_cmd):
+        mock_cmd.return_value = ("192.168.1.50\n", "", 0)
+        self.assertEqual(_get_own_ip(), "192.168.1.50")
+
+    @patch("scanner.checks.run_command")
+    def test_get_own_ip_fallback_route(self, mock_cmd):
+        mock_cmd.side_effect = [
+            ("", "", 1),  # en0 fails
+            ("   route to: default\n  interface: en1\n", "", 0),  # route
+            ("192.168.1.50\n", "", 0),  # ipconfig getifaddr en1
+        ]
+        self.assertEqual(_get_own_ip(), "192.168.1.50")
+
+    @patch("scanner.checks.run_command")
+    def test_get_local_subnet(self, mock_cmd):
+        mock_cmd.return_value = ("192.168.1.50\n", "", 0)
+        self.assertEqual(_get_local_subnet(), "192.168.1")
+
+
+class TestParsePingStats(unittest.TestCase):
+    def test_normal_output(self):
+        output = (
+            "PING 192.168.1.1 (192.168.1.1): 56 data bytes\n"
+            "64 bytes from 192.168.1.1: icmp_seq=0 ttl=64 time=2.123 ms\n"
+            "--- 192.168.1.1 ping statistics ---\n"
+            "10 packets transmitted, 10 packets received, 0.0% packet loss\n"
+            "round-trip min/avg/max/stddev = 1.234/2.345/5.678/1.234 ms\n"
+        )
+        stats = _parse_ping_stats(output)
+        self.assertIsNotNone(stats)
+        self.assertAlmostEqual(stats["avg"], 2.345)
+        self.assertAlmostEqual(stats["loss"], 0.0)
+
+    def test_with_packet_loss(self):
+        output = (
+            "--- ping statistics ---\n"
+            "5 packets transmitted, 4 packets received, 20.0% packet loss\n"
+            "round-trip min/avg/max/stddev = 1.0/5.0/10.0/3.0 ms\n"
+        )
+        stats = _parse_ping_stats(output)
+        self.assertIsNotNone(stats)
+        self.assertAlmostEqual(stats["loss"], 20.0)
+
+    def test_empty_output(self):
+        self.assertIsNone(_parse_ping_stats(""))
+
+
+class TestCheckNetworkDevices(unittest.TestCase):
+    @patch("scanner.checks._get_own_ip", return_value="192.168.1.50")
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks._get_local_subnet", return_value="192.168.1")
+    @patch("scanner.checks.run_command")
+    def test_discovers_devices(self, mock_cmd, *_):
+        def side_effect(cmd, timeout=30):
+            if cmd[0] == "ping":
+                ip = cmd[-1]
+                if ip in ("192.168.1.1", "192.168.1.50"):
+                    return ("64 bytes", "", 0)
+                return ("", "timeout", 1)
+            if cmd[0] == "arp":
+                return (
+                    "router (192.168.1.1) at aa:bb:cc:dd:ee:01 on en0\n"
+                    "mypc (192.168.1.50) at aa:bb:cc:dd:ee:02 on en0\n",
+                    "", 0,
+                )
+            return ("", "", 1)
+        mock_cmd.side_effect = side_effect
+        findings = check_network_devices()
+        self.assertTrue(any("enheter hittades" in f.title for f in findings))
+        self.assertEqual(findings[0].category, "home_network")
+
+    @patch("scanner.checks._get_own_ip", return_value=None)
+    @patch("scanner.checks._get_gateway_ip", return_value=None)
+    @patch("scanner.checks._get_local_subnet", return_value=None)
+    def test_no_subnet_is_yellow(self, *_):
+        findings = check_network_devices()
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
+class TestCheckDevicePorts(unittest.TestCase):
+    @patch("scanner.checks.socket.socket")
+    @patch("scanner.checks._get_own_ip", return_value="192.168.1.50")
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_telnet_is_red(self, mock_cmd, mock_gw, mock_own, mock_socket):
+        mock_cmd.return_value = (
+            "router (192.168.1.1) at aa:bb:cc:dd:ee:01 on en0\n",
+            "", 0,
+        )
+        mock_sock_instance = MagicMock()
+        mock_socket.return_value = mock_sock_instance
+        def connect_ex_side(addr):
+            ip, port = addr
+            if ip == "192.168.1.1" and port == 23:
+                return 0  # open
+            return 1  # closed
+        mock_sock_instance.connect_ex = connect_ex_side
+        findings = check_device_ports()
+        self.assertTrue(any(f.severity == Severity.RED for f in findings))
+
+    @patch("scanner.checks._get_own_ip", return_value="192.168.1.50")
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_arp_fails_is_yellow(self, mock_cmd, *_):
+        mock_cmd.return_value = ("", "error", 1)
+        findings = check_device_ports()
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+    @patch("scanner.checks.socket.socket")
+    @patch("scanner.checks._get_own_ip", return_value="192.168.1.50")
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_no_risky_ports_is_green(self, mock_cmd, mock_gw, mock_own, mock_socket):
+        mock_cmd.return_value = (
+            "router (192.168.1.1) at aa:bb:cc:dd:ee:01 on en0\n",
+            "", 0,
+        )
+        mock_sock_instance = MagicMock()
+        mock_socket.return_value = mock_sock_instance
+        # Only port 443 open (not risky)
+        def connect_ex_side(addr):
+            ip, port = addr
+            if ip == "192.168.1.1" and port == 443:
+                return 0
+            return 1
+        mock_sock_instance.connect_ex = connect_ex_side
+        findings = check_device_ports()
+        self.assertTrue(any(f.severity == Severity.GREEN for f in findings))
+
+
+class TestCheckDnsHijacking(unittest.TestCase):
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_nxdomain_is_green(self, mock_cmd, _):
+        mock_cmd.side_effect = [
+            ("\n", "", 0),  # dig nxdomain - empty response
+            ("142.250.74.14\n", "", 0),  # dig router google.com
+            ("142.250.74.14\n", "", 0),  # dig cloudflare google.com
+        ]
+        findings = check_dns_hijacking()
+        self.assertTrue(any(
+            f.severity == Severity.GREEN and "Ingen DNS-kapning" in f.title
+            for f in findings
+        ))
+
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_hijack_detected_is_red(self, mock_cmd, _):
+        mock_cmd.side_effect = [
+            ("93.184.216.34\n", "", 0),  # dig nxdomain returns an IP!
+            ("142.250.74.14\n", "", 0),  # dig router
+            ("142.250.74.14\n", "", 0),  # dig cloudflare
+        ]
+        findings = check_dns_hijacking()
+        self.assertTrue(any(f.severity == Severity.RED for f in findings))
+
+    @patch("scanner.checks._get_gateway_ip", return_value=None)
+    def test_no_gateway_is_yellow(self, _):
+        findings = check_dns_hijacking()
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
+class TestCheckNetworkQuality(unittest.TestCase):
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_good_quality_is_green(self, mock_cmd, _):
+        mock_cmd.side_effect = [
+            (
+                "10 packets transmitted, 10 packets received, 0.0% packet loss\n"
+                "round-trip min/avg/max/stddev = 1.0/3.5/8.0/2.0 ms\n",
+                "", 0,
+            ),
+            (
+                "5 packets transmitted, 5 packets received, 0.0% packet loss\n"
+                "round-trip min/avg/max/stddev = 10.0/15.0/20.0/3.0 ms\n",
+                "", 0,
+            ),
+        ]
+        findings = check_network_quality()
+        self.assertTrue(any(f.severity == Severity.GREEN for f in findings))
+
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_high_latency_is_red(self, mock_cmd, _):
+        mock_cmd.side_effect = [
+            (
+                "10 packets transmitted, 5 packets received, 50.0% packet loss\n"
+                "round-trip min/avg/max/stddev = 100.0/200.0/500.0/100.0 ms\n",
+                "", 0,
+            ),
+            ("", "timeout", 1),
+        ]
+        findings = check_network_quality()
+        self.assertTrue(any(f.severity == Severity.RED for f in findings))
+
+    @patch("scanner.checks._get_gateway_ip", return_value=None)
+    def test_no_gateway_is_yellow(self, _):
+        findings = check_network_quality()
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+
+class TestCheckRouterSecurity(unittest.TestCase):
+    @patch("scanner.checks.socket.socket")
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_telnet_on_router_is_red(self, mock_cmd, mock_gw, mock_socket):
+        mock_cmd.return_value = (
+            "router (192.168.1.1) at c4:04:15:aa:bb:cc on en0\n",
+            "", 0,
+        )
+        mock_sock = MagicMock()
+        mock_socket.return_value = mock_sock
+        def connect_ex_side(addr):
+            ip, port = addr
+            if port == 23:
+                return 0
+            return 1
+        mock_sock.connect_ex = connect_ex_side
+        findings = check_router_security()
+        self.assertTrue(any(f.severity == Severity.RED for f in findings))
+        self.assertIn("Netgear", findings[0].description)
+
+    @patch("scanner.checks._get_gateway_ip", return_value=None)
+    def test_no_gateway_is_yellow(self, _):
+        findings = check_router_security()
+        self.assertEqual(findings[0].severity, Severity.YELLOW)
+
+    @patch("scanner.checks.socket.socket")
+    @patch("scanner.checks._get_gateway_ip", return_value="192.168.1.1")
+    @patch("scanner.checks.run_command")
+    def test_secure_router_is_green(self, mock_cmd, mock_gw, mock_socket):
+        mock_cmd.return_value = (
+            "router (192.168.1.1) at c4:04:15:aa:bb:cc on en0\n",
+            "", 0,
+        )
+        mock_sock = MagicMock()
+        mock_socket.return_value = mock_sock
+        # Only 443 open (HTTPS only = good)
+        def connect_ex_side(addr):
+            ip, port = addr
+            if port == 443:
+                return 0
+            return 1
+        mock_sock.connect_ex = connect_ex_side
+        findings = check_router_security()
+        self.assertTrue(any(f.severity == Severity.GREEN for f in findings))
+
+
 class TestRunAllChecks(unittest.TestCase):
     @patch("scanner.checks.check_firewall", return_value=[])
     @patch("scanner.checks.check_wifi", return_value=[])
@@ -583,6 +892,11 @@ class TestRunAllChecks(unittest.TestCase):
     @patch("scanner.checks.check_filevault", return_value=[])
     @patch("scanner.checks.check_auto_updates", return_value=[])
     @patch("scanner.checks.check_arp_table", return_value=[])
+    @patch("scanner.checks.check_network_devices", return_value=[])
+    @patch("scanner.checks.check_device_ports", return_value=[])
+    @patch("scanner.checks.check_dns_hijacking", return_value=[])
+    @patch("scanner.checks.check_network_quality", return_value=[])
+    @patch("scanner.checks.check_router_security", return_value=[])
     def test_returns_combined(self, *mocks):
         findings = run_all_checks()
         self.assertEqual(findings, [])
